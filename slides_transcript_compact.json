@@ -1,0 +1,176 @@
+{
+  "metadata": {
+    "title": "The Road to Wisdom: On Truth, Science, Faith, and Trust",
+    "speaker": "Francis S. Collins, M.D., Ph.D.",
+    "event": "BYU Forum",
+    "date": "January 27, 2026",
+    "source": "https://www.youtube.com/watch?v=mFkRI8EkLEU",
+    "note": "Compressed version - speaker shots and transitions removed"
+  },
+  "slides": [
+    {
+      "id": 1,
+      "original_slides": [5],
+      "title": "The Road to Wisdom",
+      "subtitle": "On Truth, Science, Faith, and Trust",
+      "speaker": "Francis S. Collins, M.D., Ph.D."
+    },
+    {
+      "id": 2,
+      "original_slides": [6],
+      "title": "Beginnings",
+      "images": ["Farm in Shenandoah Valley, Virginia", "Young Collins playing guitar"]
+    },
+    {
+      "id": 3,
+      "original_slides": [8],
+      "title": "DNA Structure",
+      "labels": ["NUCLEUS", "CELL", "DNA"],
+      "description": "Diagram showing cell → nucleus → DNA double helix with base pairs A, T, G, C"
+    },
+    {
+      "id": 4,
+      "original_slides": [10, 13],
+      "title": "\"Gene Hunter\"",
+      "institution": "University of Michigan",
+      "diseases_studied": [
+        "Cystic fibrosis",
+        "Huntington's disease",
+        "Neurofibromatosis",
+        "Hutchinson-Gilford Progeria Syndrome"
+      ],
+      "images": ["Collins in lab", "Collins in haystack with needle", "Collins with Sam Burns and Cookie Monster"]
+    },
+    {
+      "id": 5,
+      "original_slides": [15],
+      "title": "Leading the Human Genome Project",
+      "description": "Timeline infographic of Human Genome Project milestones"
+    },
+    {
+      "id": 6,
+      "original_slides": [17],
+      "title": "Called to serve as Director of the National Institutes of Health in 2009",
+      "bullet_points": [
+        "Kept getting reappointed",
+        "Serving Presidents Obama, Trump, and Biden"
+      ],
+      "programs": ["BRAIN 2025", "All of Us Research Program", "NCATS"],
+      "achievement": "Gene therapy cure for sickle cell anemia"
+    },
+    {
+      "id": 7,
+      "original_slides": [19, 21, 23],
+      "title": "Nature provides some interesting pointers to God",
+      "bullet_points": [
+        "There is something instead of nothing",
+        "\"The unreasonable effectiveness of mathematics\"",
+        "The Big Bang",
+        "The precise tuning of physical constants in the universe"
+      ]
+    },
+    {
+      "id": 8,
+      "original_slides": [25],
+      "title": "Beauty as a pointer to God",
+      "comparison": {
+        "left": {"label": "Rose Window", "description": "Cathedral stained glass"},
+        "right": {"label": "View Along the Axis of the β DNA Helix", "description": "DNA cross-section"}
+      },
+      "point": "Visual similarity between sacred art and molecular structure"
+    },
+    {
+      "id": 9,
+      "original_slides": [27],
+      "title": "Zero-sum thinking",
+      "cartoon": {
+        "caption": "\"It's not enough that we succeed. Cats must also fail.\"",
+        "source": "The New Yorker, January 13th, 1997",
+        "description": "Dogs in a bar"
+      }
+    },
+    {
+      "id": 10,
+      "original_slides": [30, 37],
+      "title": "Today's presentation",
+      "bullet_points": [
+        "My own journey in science",
+        "How I came to be a Christian",
+        "The current state of our nation and our world",
+        "Some reflections on how we got here",
+        "Some exhortations on how to find our way back"
+      ]
+    },
+    {
+      "id": 11,
+      "original_slides": [32],
+      "title": "Truth",
+      "subtitle": "The critical need for clarity about the evidence for a claim",
+      "diagram": {
+        "type": "concentric_circles",
+        "layers_inner_to_outer": [
+          "NECESSARY TRUTH",
+          "FIRMLY ESTABLISHED FACTS",
+          "UNCERTAINTY",
+          "OPINION"
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "original_slides": [34],
+      "title": "Science",
+      "bullet_points": [
+        "Develops hypotheses",
+        "Does experiments to test those",
+        "Depends on replication",
+        "Makes mistakes but is ultimately self-correcting",
+        "A reliable way to discover truth about nature"
+      ],
+      "image": "NIH lab group photo"
+    },
+    {
+      "id": 13,
+      "original_slides": [35],
+      "title": "The Christian calling",
+      "scriptures": [
+        {"text": "Love your neighbor as yourself.", "ref": "Matthew 22:39"},
+        {"text": "Love your enemies and pray for those who persecute you.", "ref": "Matthew 5:44"},
+        {"text": "If you hold to my teaching, you are really my disciples. Then you will know the truth, and the truth will set you free.", "ref": "John 8:31-32"}
+      ],
+      "warning": {
+        "title": "And a warning...",
+        "text": "There are six things the Lord hates, seven that are detestable to him: Haughty eyes, a lying tongue, hands that shed innocent blood, A heart that devises wicked schemes, feet that are quick to rush into evil, A false witness who pours out lies, And a person who stirs up conflict in the community.",
+        "ref": "Proverbs 6:16-19"
+      }
+    },
+    {
+      "id": 14,
+      "original_slides": [38],
+      "title": "A possible pledge...",
+      "source": "Braver Angels",
+      "pledge_points": [
+        "I will seek to be part of the solution.",
+        "I will actively seek out opportunities to engage in dialogue with those who have different views from mine.",
+        "I will seek to be a wise consumer.",
+        "I will not share information of uncertain validity.",
+        "I will bring a generous spirit to all my interpersonal interactions. Loving my neighbor will be my goal."
+      ],
+      "qr_code": true
+    },
+    {
+      "id": 15,
+      "original_slides": [43],
+      "title": "\"Praise the Source of Faith and Learning\"",
+      "type": "hymn",
+      "words": "Rev. Thomas Troeger",
+      "tune": "HYFRYDOL"
+    }
+  ],
+  "summary": {
+    "original_count": 45,
+    "compressed_count": 15,
+    "compression_ratio": "67%",
+    "removed": "16 speaker close-ups, 5 transitions, 3 venue shots, 6 duplicates merged"
+  }
+}

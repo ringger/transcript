@@ -1,0 +1,35 @@
+# Audio/Video files (too large for git)
+*.mp3
+*.mp4
+*.wav
+*.webm
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output (regenerable)
+test_run/
+
+# Temporary files
+/tmp/
+*.tmp
