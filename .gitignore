@@ -33,3 +33,6 @@ test_run/
 # Temporary files
 /tmp/
 *.tmp
+
+# Intermediate processing files
+*_clean.txt
