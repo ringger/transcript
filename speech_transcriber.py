@@ -63,6 +63,8 @@ class SpeechConfig:
     no_api: bool = False  # Skip all API-dependent features
     api_key: Optional[str] = None
     skip_existing: bool = True
+    reextract_slides: bool = False  # Force re-extraction of slides only
+    dry_run: bool = False  # Show what would be done without doing it
     verbose: bool = False
 
 
@@ -175,6 +177,72 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
     costs["total"] = costs["analyze_slides"] + costs["merge_sources"] + costs["ensemble_whisper"]
 
     return costs
+
+
+def _print_dry_run(config: SpeechConfig) -> None:
+    """Print what would be done without actually doing it."""
+    print("\n" + "="*50)
+    print("DRY RUN - No actions will be taken")
+    print("="*50)
+
+    if config.reextract_slides:
+        print("\n[Reextract mode]")
+        print("  1. Load existing video and transcript files")
+        print(f"  2. Delete existing slides in {config.output_dir}/slides/")
+        print(f"  3. Extract new slides with threshold={config.scene_threshold}")
+        print("  4. Regenerate transcript.md with new slides")
+    else:
+        print("\n[Full pipeline]")
+        print("  1. Download audio, video, captions from URL")
+        print(f"  2. Transcribe with Whisper model(s): {', '.join(config.whisper_models)}")
+        if len(config.whisper_models) > 1:
+            if config.no_api:
+                print("     - Ensemble: will use largest model (no API)")
+            else:
+                print("     - Ensemble: will use Claude to resolve differences")
+        print(f"  3. Extract slides with scene threshold={config.scene_threshold}")
+
+        if config.analyze_slides:
+            if config.no_api:
+                print("  4. Analyze slides: SKIPPED (--no-api)")
+            else:
+                print("  4. Analyze slides with Claude Vision API")
+        else:
+            print("  4. Create basic slides JSON (no analysis)")
+
+        if config.merge_sources:
+            if config.no_api:
+                print("  4b. Merge sources: SKIPPED (--no-api)")
+            else:
+                print("  4b. Merge YouTube + Whisper transcripts with Claude")
+
+        print("  5. Generate markdown with slides at timestamps")
+
+    print(f"\nOutput directory: {config.output_dir}")
+
+    # Show what files would be created
+    print("\nFiles that would be created:")
+    if not config.reextract_slides:
+        print("  - <title>.mp3 (audio)")
+        print("  - <title>.mp4 (video)")
+        print("  - <title>.en.vtt (captions, if available)")
+        for model in config.whisper_models:
+            print(f"  - <title>_{model}.txt (Whisper transcript)")
+            print(f"  - <title>_{model}.json (with timestamps)")
+        if len(config.whisper_models) > 1:
+            print("  - <title>_ensembled.txt (combined transcript)")
+        if config.merge_sources and not config.no_api:
+            print("  - transcript_merged.txt (critical text)")
+
+    print("  - slides/*.png (extracted frames)")
+    print("  - slide_timestamps.json")
+    if config.analyze_slides and not config.no_api:
+        print("  - slides_transcript.json (with descriptions)")
+    else:
+        print("  - slides_basic.json")
+    print("  - transcript.md (final output)")
+
+    print("\n" + "="*50)
 
 
 def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_words: int = 6000) -> None:
@@ -577,8 +645,16 @@ def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
 
     timestamps_file = config.output_dir / "slide_timestamps.json"
 
+    # If reextract mode, clear existing slides first
+    if config.reextract_slides:
+        existing_slides = list(slides_dir.glob("slide_*.png"))
+        if existing_slides:
+            print(f"  Clearing {len(existing_slides)} existing slides for re-extraction...")
+            for slide in existing_slides:
+                slide.unlink()
+
     existing_slides = list(slides_dir.glob("slide_*.png"))
-    if config.skip_existing and existing_slides and timestamps_file.exists():
+    if config.skip_existing and existing_slides and timestamps_file.exists() and not config.reextract_slides:
         print(f"  Slides exist ({len(existing_slides)} files), skipping extraction")
         data.slide_images = sorted(existing_slides)
         # Load existing timestamps
@@ -629,6 +705,58 @@ def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
     print(f"  Extracted {len(data.slide_images)} slides with timestamps")
     if data.slide_timestamps:
         print(f"  Time range: {data.slide_timestamps[0]['timestamp']:.1f}s - {data.slide_timestamps[-1]['timestamp']:.1f}s")
+
+
+def _load_existing_data(config: SpeechConfig, data: SpeechData) -> None:
+    """Load existing media and transcript files for reextract mode."""
+    # Find video file
+    video_files = list(config.output_dir.glob("*.mp4"))
+    if not video_files:
+        raise FileNotFoundError(f"No video file found in {config.output_dir}. "
+                               "Run without --reextract-slides first to download media.")
+    data.video_path = video_files[0]
+
+    # Find audio file
+    audio_files = list(config.output_dir.glob("*.mp3"))
+    if audio_files:
+        data.audio_path = audio_files[0]
+
+    # Find captions
+    caption_files = list(config.output_dir.glob("*.vtt"))
+    if caption_files:
+        data.captions_path = caption_files[0]
+
+    # Extract title from filename
+    data.title = data.video_path.stem
+
+    # Find transcript files
+    # Prefer ensembled, then medium, then small, then any
+    for pattern in ["*_ensembled.txt", "*_medium.txt", "*_small.txt", "*.txt"]:
+        txt_files = list(config.output_dir.glob(pattern))
+        # Filter out merged transcript
+        txt_files = [f for f in txt_files if "merged" not in f.name]
+        if txt_files:
+            data.transcript_path = txt_files[0]
+            break
+
+    # Find JSON with timestamps
+    for pattern in ["*_medium.json", "*_small.json", "*.json"]:
+        json_files = list(config.output_dir.glob(pattern))
+        # Filter out slide-related JSON files
+        json_files = [f for f in json_files if "slide" not in f.name and "basic" not in f.name]
+        if json_files:
+            data.transcript_json_path = json_files[0]
+            break
+
+    # Load transcript segments if we have JSON
+    if data.transcript_json_path and data.transcript_json_path.exists():
+        _load_transcript_segments(data)
+
+    print(f"  Found video: {data.video_path.name}")
+    if data.transcript_path:
+        print(f"  Found transcript: {data.transcript_path.name}")
+    if data.transcript_json_path:
+        print(f"  Found timestamps: {data.transcript_json_path.name}")
 
 
 def _load_slide_timestamps(data: SpeechData, timestamps_file: Path) -> None:
@@ -1337,6 +1465,10 @@ Examples:
                         help="Skip all API-dependent features (slide analysis, merging, ensembling)")
     parser.add_argument("--no-skip", action="store_true",
                         help="Re-download/process even if files exist")
+    parser.add_argument("--reextract-slides", action="store_true",
+                        help="Force re-extraction of slides with current threshold (skips download/transcription)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would be done without actually doing it")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show detailed command output")
 
@@ -1393,6 +1525,8 @@ Examples:
         no_api=args.no_api,
         api_key=args.api_key,
         skip_existing=not args.no_skip,
+        reextract_slides=args.reextract_slides,
+        dry_run=args.dry_run,
         verbose=args.verbose,
     )
 
@@ -1424,26 +1558,37 @@ Examples:
     if api_features_requested and not config.no_api:
         print_cost_estimate(config)
 
+    # Dry run mode - show what would be done
+    if config.dry_run:
+        _print_dry_run(config)
+        return
+
     try:
         # Run pipeline
-        download_media(config, data)
+        if config.reextract_slides:
+            # Reextract mode: skip download and transcription, load existing data
+            print("\n[Reextract mode] Skipping download and transcription...")
+            _load_existing_data(config, data)
+        else:
+            download_media(config, data)
 
-        # Update output dir with actual title
-        if data.title and not args.output_dir:
-            safe_title = re.sub(r'[^\w\s-]', '', data.title)[:50].strip()
-            new_output_dir = Path(f"./transcripts/{safe_title}")
-            if output_dir != new_output_dir and not new_output_dir.exists():
-                output_dir.rename(new_output_dir)
-                config.output_dir = new_output_dir
-                # Update paths in data
-                if data.audio_path:
-                    data.audio_path = new_output_dir / data.audio_path.name
-                if data.video_path:
-                    data.video_path = new_output_dir / data.video_path.name
-                if data.captions_path:
-                    data.captions_path = new_output_dir / data.captions_path.name
+            # Update output dir with actual title
+            if data.title and not args.output_dir:
+                safe_title = re.sub(r'[^\w\s-]', '', data.title)[:50].strip()
+                new_output_dir = Path(f"./transcripts/{safe_title}")
+                if output_dir != new_output_dir and not new_output_dir.exists():
+                    output_dir.rename(new_output_dir)
+                    config.output_dir = new_output_dir
+                    # Update paths in data
+                    if data.audio_path:
+                        data.audio_path = new_output_dir / data.audio_path.name
+                    if data.video_path:
+                        data.video_path = new_output_dir / data.video_path.name
+                    if data.captions_path:
+                        data.captions_path = new_output_dir / data.captions_path.name
 
-        transcribe_audio(config, data)
+            transcribe_audio(config, data)
+
         extract_slides(config, data)
 
         if config.analyze_slides:

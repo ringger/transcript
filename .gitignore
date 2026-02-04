@@ -29,6 +29,7 @@ Thumbs.db
 
 # Test output (regenerable)
 test_run/
+test_video*/
 
 # Temporary files
 /tmp/
