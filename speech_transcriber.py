@@ -22,11 +22,11 @@ Examples:
     # Full pipeline with slide analysis
     python speech_transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
 
-    # Create "critical text" by merging YouTube captions with Whisper
-    python speech_transcriber.py "https://youtube.com/watch?v=..." --merge-sources
+    # Skip merging YouTube captions (merge is on by default)
+    python speech_transcriber.py "https://youtube.com/watch?v=..." --no-merge
 
-    # Full pipeline with all features
-    python speech_transcriber.py "https://youtube.com/watch?v=..." --analyze-slides --merge-sources
+    # Full pipeline with slide analysis (merging is automatic)
+    python speech_transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
 
     # Ensemble multiple Whisper models for better accuracy
     python speech_transcriber.py "https://youtube.com/watch?v=..." --whisper-models small,medium
@@ -59,7 +59,7 @@ class SpeechConfig:
     whisper_models: list = field(default_factory=lambda: ["medium"])  # Can be multiple models
     scene_threshold: float = 0.1
     analyze_slides: bool = False
-    merge_sources: bool = False  # Merge YouTube captions with Whisper
+    merge_sources: bool = True  # Merge YouTube captions with Whisper (default: on)
     no_api: bool = False  # Skip all API-dependent features
     api_key: Optional[str] = None
     skip_existing: bool = True
@@ -214,7 +214,9 @@ def _print_dry_run(config: SpeechConfig) -> None:
             if config.no_api:
                 print("  4b. Merge sources: SKIPPED (--no-api)")
             else:
-                print("  4b. Merge YouTube + Whisper transcripts with Claude")
+                print("  4b. Merge YouTube + Whisper transcripts with Claude (default: on)")
+        else:
+            print("  4b. Merge sources: SKIPPED (--no-merge)")
 
         print("  5. Generate markdown with slides at timestamps")
 
@@ -910,7 +912,7 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     print("\n[4b/5] Merging transcript sources...")
 
     if not config.merge_sources:
-        print("  Skipped (use --merge-sources to enable)")
+        print("  Skipped (--no-merge flag set)")
         return
 
     if config.no_api:
@@ -1438,9 +1440,8 @@ def main():
 Examples:
   %(prog)s "https://youtube.com/watch?v=..."
   %(prog)s "https://youtube.com/watch?v=..." --analyze-slides
-  %(prog)s "https://youtube.com/watch?v=..." --merge-sources
+  %(prog)s "https://youtube.com/watch?v=..." --no-merge
   %(prog)s "https://youtube.com/watch?v=..." --whisper-models small,medium
-  %(prog)s "https://youtube.com/watch?v=..." --whisper-models small,medium --merge-sources
   %(prog)s "https://youtube.com/watch?v=..." --no-api
   %(prog)s "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
         """
@@ -1457,8 +1458,8 @@ Examples:
                         help="Scene detection threshold 0-1 (default: 0.1)")
     parser.add_argument("--analyze-slides", action="store_true",
                         help="Use Claude vision API to analyze slides (requires API key)")
-    parser.add_argument("--merge-sources", action="store_true",
-                        help="Merge YouTube captions with Whisper using wdiff + Claude (requires API key)")
+    parser.add_argument("--no-merge", action="store_true",
+                        help="Skip merging YouTube captions with Whisper (merge is on by default)")
     parser.add_argument("--api-key",
                         help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
     parser.add_argument("--no-api", action="store_true",
@@ -1521,7 +1522,7 @@ Examples:
         whisper_models=whisper_models,
         scene_threshold=args.scene_threshold,
         analyze_slides=args.analyze_slides,
-        merge_sources=args.merge_sources,
+        merge_sources=not args.no_merge,
         no_api=args.no_api,
         api_key=args.api_key,
         skip_existing=not args.no_skip,
@@ -1542,7 +1543,7 @@ Examples:
             if config.analyze_slides:
                 print("  --analyze-slides (requires API)")
             if config.merge_sources:
-                print("  --merge-sources (requires API)")
+                print("  --merge-sources [on by default] (requires API)")
             if len(config.whisper_models) > 1:
                 print(f"  --whisper-models {','.join(config.whisper_models)} (ensembling requires API)")
             print("\nOptions:")
@@ -1638,8 +1639,8 @@ Examples:
         if not config.analyze_slides and data.slide_images:
             print("\nTip: Run with --analyze-slides to get detailed slide descriptions")
 
-        if not config.merge_sources and data.captions_path and data.captions_path.exists():
-            print("Tip: Run with --merge-sources to create a 'critical text' from YouTube + Whisper")
+        if (not config.merge_sources or config.no_api) and data.captions_path and data.captions_path.exists() and not data.merged_transcript_path:
+            print("Tip: YouTube captions available - run without --no-merge/--no-api to create a 'critical text'")
 
     except Exception as e:
         print(f"\nError: {e}")
