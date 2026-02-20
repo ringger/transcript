@@ -27,9 +27,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# Test output (regenerable)
-test_run/
-test_video*/
+# Transcript output (regenerable)
+transcripts/
 
 # Temporary files
 /tmp/
