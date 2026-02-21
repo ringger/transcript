@@ -18,18 +18,23 @@ from transcriber import (
     _detect_transcript_structure,
     _dry_run_skip,
     _extract_aligned_chunk,
+    _extract_text_from_html,
     _filter_meaningful_diffs,
+    _format_paragraph,
     _format_structured_segments,
     _init_merge_chunks_dir,
+    _load_transcript_segments,
     _merge_multi_source,
     _merge_structured,
     _normalize_for_comparison,
     _parse_structured_transcript,
     _parse_wdiff_tokens,
     _strip_structured_headers,
+    _wdiff_stats,
     analyze_source_survival,
     api_call_with_retry,
     clean_vtt_captions,
+    estimate_api_cost,
     generate_markdown,
     is_up_to_date,
     merge_transcript_sources,
@@ -1342,3 +1347,458 @@ class TestCheckpointFileIntegrity:
         assert mock_api.call_count == 1
         # Version file should be updated
         assert (chunks_dir / ".version").read_text().strip() == MERGE_CHECKPOINT_VERSION
+
+
+# ---------------------------------------------------------------------------
+# _extract_text_from_html
+# ---------------------------------------------------------------------------
+
+class TestExtractTextFromHtml:
+    def test_lex_fridman_structured_format(self):
+        html = '''
+        <div class="ts-segment">
+            <span class="ts-name">Lex Fridman</span>
+            <span class="ts-timestamp"><a href="#">(0:00:00)</a> </span>
+            <span class="ts-text">Hello and welcome.</span>
+        </div>
+        <div class="ts-segment">
+            <span class="ts-name">Guest</span>
+            <span class="ts-timestamp"><a href="#">(0:01:00)</a> </span>
+            <span class="ts-text">Thanks for having me.</span>
+        </div>
+        '''
+        result = _extract_text_from_html(html)
+        assert "Lex Fridman (0:00:00)" in result
+        assert "Hello and welcome." in result
+        assert "Guest (0:01:00)" in result
+        assert "Thanks for having me." in result
+
+    def test_structured_html_strips_inner_tags(self):
+        html = '''
+        <div class="ts-segment">
+            <span class="ts-name">Speaker</span>
+            <span class="ts-timestamp"><a href="#">(0:00:00)</a> </span>
+            <span class="ts-text">Word <b>bold</b> and <i>italic</i> here.</span>
+        </div>
+        '''
+        result = _extract_text_from_html(html)
+        assert "Word bold and italic here." in result
+        assert "<b>" not in result
+
+    def test_structured_html_unescapes_entities(self):
+        html = '''
+        <div class="ts-segment">
+            <span class="ts-name">Speaker</span>
+            <span class="ts-timestamp"><a href="#">(0:00:00)</a> </span>
+            <span class="ts-text">It&apos;s a &amp; test.</span>
+        </div>
+        '''
+        result = _extract_text_from_html(html)
+        assert "It's a & test." in result
+
+    def test_generic_html_fallback(self):
+        html = '''<html><body>
+        <p>First paragraph.</p>
+        <p>Second paragraph.</p>
+        </body></html>'''
+        result = _extract_text_from_html(html)
+        assert "First paragraph." in result
+        assert "Second paragraph." in result
+
+    def test_generic_html_skips_script_and_style(self):
+        html = '''<html><body>
+        <script>var x = 1;</script>
+        <style>.foo { color: red; }</style>
+        <nav>Navigation menu</nav>
+        <p>Actual content.</p>
+        </body></html>'''
+        result = _extract_text_from_html(html)
+        assert "Actual content." in result
+        assert "var x" not in result
+        assert "color: red" not in result
+        assert "Navigation menu" not in result
+
+    def test_plain_text_passthrough(self):
+        text = "This is just plain text with no HTML tags."
+        result = _extract_text_from_html(text)
+        assert "This is just plain text with no HTML tags." in result
+
+    def test_empty_html(self):
+        result = _extract_text_from_html("")
+        assert result == ""
+
+    def test_collapses_multiple_blank_lines(self):
+        html = "<p>One</p><p></p><p></p><p></p><p>Two</p>"
+        result = _extract_text_from_html(html)
+        # Should not have more than 2 consecutive newlines
+        assert "\n\n\n" not in result
+
+
+# ---------------------------------------------------------------------------
+# estimate_api_cost
+# ---------------------------------------------------------------------------
+
+class TestEstimateApiCost:
+    def test_no_api_returns_zero(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, no_api=True)
+        costs = estimate_api_cost(config)
+        assert costs["total"] == 0.0
+        assert costs["details"] == []
+
+    def test_merge_only(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              analyze_slides=False, whisper_models=["medium"])
+        costs = estimate_api_cost(config, transcript_words=6000)
+        assert costs["merge_sources"] > 0
+        assert costs["analyze_slides"] == 0.0
+        assert costs["ensemble_whisper"] == 0.0
+        assert costs["total"] == costs["merge_sources"]
+        assert len(costs["details"]) == 1
+
+    def test_slides_only(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              analyze_slides=True, merge_sources=False,
+                              whisper_models=["medium"])
+        costs = estimate_api_cost(config, num_slides=10)
+        assert costs["analyze_slides"] == pytest.approx(0.20)
+        assert costs["merge_sources"] == 0.0
+        assert costs["total"] == costs["analyze_slides"]
+
+    def test_ensemble_requires_multiple_models(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              merge_sources=False, whisper_models=["medium"])
+        costs = estimate_api_cost(config)
+        assert costs["ensemble_whisper"] == 0.0
+
+        config2 = SpeechConfig(url="x", output_dir=tmp_path,
+                               merge_sources=False,
+                               whisper_models=["small", "medium"])
+        costs2 = estimate_api_cost(config2)
+        assert costs2["ensemble_whisper"] > 0
+
+    def test_external_transcript_adds_source(self, tmp_path):
+        config2 = SpeechConfig(url="x", output_dir=tmp_path,
+                               whisper_models=["medium"])
+        config3 = SpeechConfig(url="x", output_dir=tmp_path,
+                               whisper_models=["medium"],
+                               external_transcript="http://example.com")
+        cost2 = estimate_api_cost(config2, transcript_words=10000)
+        cost3 = estimate_api_cost(config3, transcript_words=10000)
+        # 3 sources should cost more than 2
+        assert cost3["merge_sources"] > cost2["merge_sources"]
+
+    def test_total_is_sum_of_parts(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              analyze_slides=True,
+                              whisper_models=["small", "medium"])
+        costs = estimate_api_cost(config, num_slides=20, transcript_words=5000)
+        expected = costs["analyze_slides"] + costs["merge_sources"] + costs["ensemble_whisper"]
+        assert costs["total"] == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# api_call_with_retry — timeout handling
+# ---------------------------------------------------------------------------
+
+class TestApiCallWithRetryTimeout:
+    @pytest.fixture
+    def cfg(self, tmp_path):
+        return SpeechConfig(url="x", output_dir=tmp_path,
+                            api_initial_backoff=1, api_max_retries=3)
+
+    @patch("transcriber.time.sleep")
+    def test_retries_on_timeout(self, mock_sleep, cfg):
+        import anthropic
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            anthropic.APITimeoutError(request=MagicMock()),
+            "ok"
+        ]
+        result = api_call_with_retry(client, cfg, model="test",
+                                     max_tokens=100, messages=[])
+        assert result == "ok"
+        assert client.messages.create.call_count == 2
+        assert mock_sleep.call_count == 1
+
+    @patch("transcriber.time.sleep")
+    def test_raises_after_max_timeout_retries(self, mock_sleep, cfg):
+        import anthropic
+
+        client = MagicMock()
+        client.messages.create.side_effect = anthropic.APITimeoutError(
+            request=MagicMock())
+        with pytest.raises(anthropic.APITimeoutError):
+            api_call_with_retry(client, cfg, model="test",
+                                max_tokens=100, messages=[])
+        assert client.messages.create.call_count == 3
+
+    @patch("transcriber.time.sleep")
+    def test_timeout_backoff_is_exponential(self, mock_sleep, cfg):
+        import anthropic
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            anthropic.APITimeoutError(request=MagicMock()),
+            anthropic.APITimeoutError(request=MagicMock()),
+            "ok"
+        ]
+        api_call_with_retry(client, cfg, model="test",
+                            max_tokens=100, messages=[])
+        delays = [call.args[0] for call in mock_sleep.call_args_list]
+        assert delays == [1, 2]  # initial_backoff=1, then doubled
+
+    def test_passes_timeout_from_config(self, cfg):
+        client = MagicMock()
+        client.messages.create.return_value = "ok"
+        api_call_with_retry(client, cfg, model="test",
+                            max_tokens=100, messages=[])
+        call_kwargs = client.messages.create.call_args[1]
+        assert call_kwargs["timeout"] == cfg.api_timeout
+
+    def test_explicit_timeout_overrides_config(self, cfg):
+        client = MagicMock()
+        client.messages.create.return_value = "ok"
+        api_call_with_retry(client, cfg, model="test",
+                            max_tokens=100, messages=[], timeout=30.0)
+        call_kwargs = client.messages.create.call_args[1]
+        assert call_kwargs["timeout"] == 30.0
+
+
+# ---------------------------------------------------------------------------
+# _load_transcript_segments
+# ---------------------------------------------------------------------------
+
+class TestLoadTranscriptSegments:
+    def test_loads_segments_from_json(self, tmp_path):
+        json_path = tmp_path / "transcript.json"
+        json_path.write_text(json.dumps({
+            "segments": [
+                {"start": 0.0, "end": 1.5, "text": "Hello world"},
+                {"start": 1.5, "end": 3.0, "text": "Second segment"},
+            ]
+        }))
+        data = SpeechData()
+        data.transcript_json_path = json_path
+        _load_transcript_segments(data)
+        assert len(data.transcript_segments) == 2
+        assert data.transcript_segments[0]["text"] == "Hello world"
+        assert data.transcript_segments[0]["start"] == 0.0
+        assert data.transcript_segments[1]["end"] == 3.0
+
+    def test_skips_empty_text_segments(self, tmp_path):
+        json_path = tmp_path / "transcript.json"
+        json_path.write_text(json.dumps({
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "Good"},
+                {"start": 1.0, "end": 2.0, "text": "  "},
+                {"start": 2.0, "end": 3.0, "text": ""},
+            ]
+        }))
+        data = SpeechData()
+        data.transcript_json_path = json_path
+        _load_transcript_segments(data)
+        assert len(data.transcript_segments) == 1
+        assert data.transcript_segments[0]["text"] == "Good"
+
+    def test_no_json_path_is_noop(self):
+        data = SpeechData()
+        data.transcript_json_path = None
+        _load_transcript_segments(data)
+        assert data.transcript_segments == []
+
+    def test_missing_file_is_noop(self, tmp_path):
+        data = SpeechData()
+        data.transcript_json_path = tmp_path / "nonexistent.json"
+        _load_transcript_segments(data)
+        assert data.transcript_segments == []
+
+    def test_malformed_json_does_not_raise(self, tmp_path):
+        json_path = tmp_path / "bad.json"
+        json_path.write_text("not json at all {{{")
+        data = SpeechData()
+        data.transcript_json_path = json_path
+        _load_transcript_segments(data)  # should not raise
+        assert data.transcript_segments == []
+
+    def test_missing_fields_use_defaults(self, tmp_path):
+        json_path = tmp_path / "transcript.json"
+        json_path.write_text(json.dumps({
+            "segments": [
+                {"text": "No times here"},
+            ]
+        }))
+        data = SpeechData()
+        data.transcript_json_path = json_path
+        _load_transcript_segments(data)
+        assert len(data.transcript_segments) == 1
+        assert data.transcript_segments[0]["start"] == 0
+        assert data.transcript_segments[0]["end"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _wdiff_stats (requires real wdiff)
+# ---------------------------------------------------------------------------
+
+class TestWdiffStats:
+    def test_identical_texts(self):
+        stats = _wdiff_stats("hello world foo bar", "hello world foo bar")
+        assert stats["a"]["words"] == 4
+        assert stats["a"]["common"] == 4
+        assert stats["a"]["common_pct"] == 100
+        assert stats["b"]["common_pct"] == 100
+
+    def test_completely_different(self):
+        stats = _wdiff_stats("alpha beta gamma", "one two three")
+        assert stats["a"]["words"] == 3
+        assert stats["b"]["words"] == 3
+        assert stats["a"]["common"] == 0
+        assert stats["a"]["common_pct"] == 0
+
+    def test_partial_overlap(self):
+        stats = _wdiff_stats("the quick brown fox", "the slow brown fox")
+        assert stats["a"]["words"] == 4
+        assert stats["a"]["common"] == 3
+        assert stats["b"]["common"] == 3
+
+    def test_different_lengths(self):
+        stats = _wdiff_stats("one two three", "one two three four five")
+        assert stats["a"]["words"] == 3
+        assert stats["b"]["words"] == 5
+        # All 3 words from A are common
+        assert stats["a"]["common"] == 3
+        assert stats["b"]["common"] == 3
+
+
+# ---------------------------------------------------------------------------
+# _format_paragraph
+# ---------------------------------------------------------------------------
+
+class TestFormatParagraph:
+    def test_short_text_no_splitting(self):
+        result = _format_paragraph("One sentence. Two sentence.")
+        assert result == "One sentence. Two sentence."
+
+    def test_splits_at_three_sentences(self):
+        text = "First. Second. Third. Fourth. Fifth. Sixth."
+        result = _format_paragraph(text)
+        parts = result.split("\n\n")
+        assert len(parts) == 2
+        assert "First. Second. Third." in parts[0]
+        assert "Fourth. Fifth. Sixth." in parts[1]
+
+    def test_preserves_sentence_boundaries(self):
+        text = "Hello world. This is a test. Another one here. And a fourth."
+        result = _format_paragraph(text)
+        # Should not break mid-sentence
+        for part in result.split("\n\n"):
+            assert part.rstrip().endswith(".")
+
+    def test_handles_question_and_exclamation(self):
+        text = "What is this? I love it! Great. Next one? Yes! Done."
+        result = _format_paragraph(text)
+        parts = result.split("\n\n")
+        assert len(parts) == 2
+
+    def test_single_sentence(self):
+        result = _format_paragraph("Just one sentence here.")
+        assert result == "Just one sentence here."
+
+    def test_empty_string(self):
+        result = _format_paragraph("")
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# _normalize_for_comparison — additional edge cases
+# ---------------------------------------------------------------------------
+
+class TestNormalizeEdgeCases:
+    def test_unicode_accented_characters(self):
+        result = _normalize_for_comparison("café résumé naïve")
+        assert result == "café résumé naïve"
+
+    def test_numbers_preserved(self):
+        result = _normalize_for_comparison("There are 42 items worth $100")
+        assert "42" in result
+        assert "100" in result
+
+    def test_multiple_consecutive_punctuation(self):
+        result = _normalize_for_comparison("What?!? Really!!!")
+        words = result.split()
+        assert len(words) == 2  # word count preserved
+
+    def test_all_punctuation_word(self):
+        result = _normalize_for_comparison("hello --- world")
+        words = result.split()
+        assert len(words) == 3  # placeholder for ---
+        assert words[1] == "_"
+
+    def test_mixed_emoji_and_text(self):
+        # Emoji may or may not be \w depending on regex engine
+        result = _normalize_for_comparison("hello world")
+        assert "hello" in result
+        assert "world" in result
+
+
+# ---------------------------------------------------------------------------
+# _build_wdiff_alignment — additional edge cases
+# ---------------------------------------------------------------------------
+
+class TestBuildWdiffAlignmentEdgeCases:
+    def test_empty_text_a(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        alignment = _build_wdiff_alignment("", "hello world", config)
+        # Empty text A: alignment should have 1 entry (just sentinel)
+        assert len(alignment) == 1
+
+    def test_empty_text_b(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        alignment = _build_wdiff_alignment("hello world", "", config)
+        assert len(alignment) == 3  # 2 words + sentinel
+
+    def test_single_word_identical(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        alignment = _build_wdiff_alignment("hello", "hello", config)
+        assert len(alignment) == 2
+        assert alignment[0] == 0
+        assert alignment[1] == 1
+
+    def test_single_word_different(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        alignment = _build_wdiff_alignment("hello", "world", config)
+        assert len(alignment) == 2
+
+
+# ---------------------------------------------------------------------------
+# _extract_aligned_chunk — edge cases
+# ---------------------------------------------------------------------------
+
+class TestExtractAlignedChunkEdgeCases:
+    def test_end_at_alignment_boundary(self):
+        """end == len(alignment) - 1 should work (sentinel access)."""
+        anchor = ["a", "b", "c"]
+        alignment = [0, 1, 2, 3]  # identity + sentinel
+        other_words = [["x", "y", "z"]]
+        texts = _extract_aligned_chunk(anchor, 0, 3, [alignment], other_words)
+        assert texts[0] == "a b c"
+        assert texts[1] == "x y z"
+
+    def test_empty_chunk(self):
+        """start == end should produce empty text."""
+        anchor = ["a", "b", "c"]
+        alignment = [0, 1, 2, 3]
+        other_words = [["x", "y", "z"]]
+        texts = _extract_aligned_chunk(anchor, 1, 1, [alignment], other_words)
+        assert texts[0] == ""
+
+    def test_no_corresponding_text_placeholder(self):
+        """When other source has no text for a range, should return placeholder."""
+        anchor = ["a", "b", "c"]
+        # All anchor words map to position 0 in other, sentinel also 0
+        alignment = [0, 0, 0, 0]
+        other_words = [["only"]]
+        texts = _extract_aligned_chunk(anchor, 0, 3, [alignment], other_words)
+        assert texts[0] == "a b c"
+        # other_start=0, other_end=0 → empty → placeholder
+        assert texts[1] == "(no corresponding text)"
