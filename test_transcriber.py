@@ -1,4 +1,4 @@
-"""Tests for speech_transcriber.py — pure functions and DAG logic."""
+"""Tests for transcriber.py — pure functions and DAG logic."""
 
 import json
 import time
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from speech_transcriber import (
+from transcriber import (
     MERGE_CHECKPOINT_VERSION,
     SpeechConfig,
     SpeechData,
@@ -413,7 +413,7 @@ class TestApiCallWithRetry:
         assert result == "ok"
         assert client.messages.create.call_count == 1
 
-    @patch("speech_transcriber.time.sleep")
+    @patch("transcriber.time.sleep")
     def test_retries_on_529(self, mock_sleep, cfg):
         import anthropic
 
@@ -429,7 +429,7 @@ class TestApiCallWithRetry:
         assert client.messages.create.call_count == 3
         assert mock_sleep.call_count == 2
 
-    @patch("speech_transcriber.time.sleep")
+    @patch("transcriber.time.sleep")
     def test_exponential_backoff(self, mock_sleep, cfg):
         import anthropic
 
@@ -444,7 +444,7 @@ class TestApiCallWithRetry:
         delays = [call.args[0] for call in mock_sleep.call_args_list]
         assert delays == [5, 10, 20]
 
-    @patch("speech_transcriber.time.sleep")
+    @patch("transcriber.time.sleep")
     def test_raises_after_max_retries(self, mock_sleep, cfg):
         import anthropic
 
@@ -862,7 +862,7 @@ class TestBuildWdiffAlignment:
 class TestMergeStructuredEndToEnd:
     """Test _merge_structured with real wdiff subprocess, only mocking the API."""
 
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber.api_call_with_retry")
     def test_blind_merge_with_real_wdiff(self, mock_api, tmp_path):
         """Full pipeline: wdiff alignment + anonymous prompting + response parsing."""
         segments = [
@@ -922,7 +922,7 @@ class TestMergeStructuredEndToEnd:
         assert result[0]["text"] == "Welcome to the podcast today"
         assert result[1]["text"] == "Thanks for having me here"
 
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber.api_call_with_retry")
     def test_alignment_extracts_correct_segments_for_prompt(self, mock_api, tmp_path):
         """Verify wdiff alignment produces sensible per-segment text in the prompt."""
         segments = [
@@ -1067,7 +1067,7 @@ class TestComputeChunkDiffs:
 class TestMergeMultiSourceEndToEnd:
     """Test _merge_multi_source with real wdiff, only mocking the API."""
 
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber.api_call_with_retry")
     def test_anonymous_prompt_no_source_names(self, mock_api, tmp_path):
         """Source names should not appear in the prompt sent to Claude."""
         sources = [
@@ -1096,7 +1096,7 @@ class TestMergeMultiSourceEndToEnd:
         result = _merge_multi_source("fake-key", sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber.api_call_with_retry")
     def test_three_sources(self, mock_api, tmp_path):
         """Flat merge with 3 sources should work with wdiff alignment."""
         text = "the quick brown fox jumps over the lazy dog " * 60
@@ -1125,7 +1125,7 @@ class TestMergeMultiSourceEndToEnd:
         result = _merge_multi_source("fake-key", sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber.api_call_with_retry")
     def test_checkpoint_versioning(self, mock_api, tmp_path):
         """Flat merge should use checkpoint versioning."""
         text = "word " * 600
@@ -1194,8 +1194,8 @@ class TestCheckpointFileIntegrity:
             return msg
         return responder
 
-    @patch("speech_transcriber._build_wdiff_alignment")
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber._build_wdiff_alignment")
+    @patch("transcriber.api_call_with_retry")
     def test_each_chunk_gets_own_checkpoint(self, mock_api, mock_align, tmp_path):
         """Verify the checkpoint_path bug fix: each chunk writes a distinct file."""
         segments, all_sources = self._make_segments_and_sources(6)
@@ -1239,8 +1239,8 @@ class TestCheckpointFileIntegrity:
         assert version_file.exists()
         assert version_file.read_text().strip() == MERGE_CHECKPOINT_VERSION
 
-    @patch("speech_transcriber._build_wdiff_alignment")
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber._build_wdiff_alignment")
+    @patch("transcriber.api_call_with_retry")
     def test_partial_resume_skips_fresh_chunks(self, mock_api, mock_align, tmp_path):
         """Pre-existing fresh checkpoints should be loaded, not re-processed."""
         segments, all_sources = self._make_segments_and_sources(4)
@@ -1278,8 +1278,8 @@ class TestCheckpointFileIntegrity:
         assert result[0]["text"] == "Cached segment one."
         assert result[1]["text"] == "Cached segment two."
 
-    @patch("speech_transcriber._build_wdiff_alignment")
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber._build_wdiff_alignment")
+    @patch("transcriber.api_call_with_retry")
     def test_stale_checkpoint_is_reprocessed(self, mock_api, mock_align, tmp_path):
         """A checkpoint older than a source should be re-processed via API."""
         segments, all_sources = self._make_segments_and_sources(2)
@@ -1312,8 +1312,8 @@ class TestCheckpointFileIntegrity:
         assert mock_api.call_count == 1
         assert result[0]["text"] == "Merged text for passage 1."
 
-    @patch("speech_transcriber._build_wdiff_alignment")
-    @patch("speech_transcriber.api_call_with_retry")
+    @patch("transcriber._build_wdiff_alignment")
+    @patch("transcriber.api_call_with_retry")
     def test_version_mismatch_clears_old_checkpoints(self, mock_api, mock_align, tmp_path):
         """Checkpoint version mismatch should clear old chunk files."""
         segments, all_sources = self._make_segments_and_sources(2)

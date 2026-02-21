@@ -1,16 +1,21 @@
 # Speech Transcriber
 
-Automated transcription pipeline for speeches from video URLs. Downloads media, transcribes with Whisper, extracts slides, and generates markdown with slides interleaved at correct timestamps.
+Automated pipeline for producing accurate speech transcripts from video URLs. Downloads media, transcribes with multiple Whisper models, and merges all available sources — Whisper, YouTube captions, and optional external transcripts — into a single "critical text" using LLM-based adjudication.
+
+The approach applies principles from [textual criticism](https://en.wikipedia.org/wiki/Textual_criticism): multiple independent "witnesses" to the same speech are aligned, compared, and merged by an LLM that judges each difference on its merits, without knowing which source produced which reading. This builds on earlier work applying similar techniques to OCR ([Ringger & Lund, 2014](https://scholarsarchive.byu.edu/facpub/1647/); [Lund et al., 2013](https://www.researchgate.net/publication/220861175_Error_Correction_with_In-Domain_Training_Across_Multiple_OCR_System_Outputs)), replacing trained classifiers with an LLM as the eclectic editor.
 
 ## Features
 
-- **Multi-source transcription**: Combines YouTube captions + Whisper AI for best accuracy
-- **Multi-model ensembling**: Run multiple Whisper models and merge results
-- **Slide extraction**: Automatic scene detection to capture presentation slides
-- **Slide analysis**: Optional vision API to describe slide content
-- **Timestamp alignment**: Places slides inline with transcript at correct moments
-- **Cost estimation**: Shows estimated API costs before running
-- **Local-only mode**: `--no-api` flag for completely free operation
+- **Critical text merging**: Combines 2–3+ transcript sources into the most accurate version using blind, anonymous presentation to an LLM — no source receives preferential treatment
+- **wdiff-based alignment**: Uses longest common subsequence alignment (via `wdiff`) to keep chunks properly aligned across sources of different lengths, replacing naive proportional slicing
+- **Multi-model Whisper ensembling**: Runs multiple Whisper models (e.g., small + medium) and resolves disagreements via LLM
+- **External transcript support**: Merges in human-edited transcripts (e.g., from publisher websites) as an additional source
+- **Structured transcript preservation**: When external transcripts have speaker labels and timestamps, the merged output preserves that structure
+- **Slide extraction and analysis**: Automatic scene detection for presentation slides, with optional vision API descriptions
+- **Make-style DAG pipeline**: Each stage checks whether its outputs are newer than its inputs, skipping unnecessary work
+- **Checkpoint resumption**: Long merge operations save per-chunk checkpoints, resuming from where they left off after interruption
+- **Cost estimation**: Shows estimated API costs before running (`--dry-run` for estimation only)
+- **Local-only mode**: `--no-api` for completely free operation (Whisper only)
 
 ## Installation
 
@@ -18,19 +23,16 @@ Automated transcription pipeline for speeches from video URLs. Downloads media, 
 
 ```bash
 # Required tools
-brew install ffmpeg
+brew install ffmpeg wdiff
 pip install yt-dlp mlx-whisper
 
-# Optional (for wdiff-based comparison)
-brew install wdiff
-
-# Optional (for API features)
+# Required for merge/ensemble features
 pip install anthropic
 ```
 
 ### Apple Silicon
 
-This tool is optimized for Apple Silicon Macs using `mlx-whisper`. On other platforms, it falls back to `openai-whisper` (slower, CPU-based):
+This tool is optimized for Apple Silicon Macs using `mlx-whisper`. On other platforms, it falls back to `openai-whisper`:
 
 ```bash
 pip install openai-whisper  # For non-Apple Silicon
@@ -39,216 +41,208 @@ pip install openai-whisper  # For non-Apple Silicon
 ## Quick Start
 
 ```bash
-# Basic usage - Whisper transcript + slides
-python speech_transcriber.py "https://youtube.com/watch?v=..."
+# Basic: Whisper transcription + YouTube caption merge
+python transcriber.py "https://youtube.com/watch?v=..."
 
-# Run completely free (no API calls)
-python speech_transcriber.py "https://youtube.com/watch?v=..." --no-api
+# With an external human-edited transcript for three-way merge
+python transcriber.py "https://youtube.com/watch?v=..." \
+    --external-transcript "https://example.com/transcript"
+
+# Dry run: see what would happen and estimated costs
+python transcriber.py "https://youtube.com/watch?v=..." --dry-run
+
+# Free/local only (no API calls)
+python transcriber.py "https://youtube.com/watch?v=..." --no-api
 ```
 
 ## Usage Examples
 
-### Free/Local Operation
+### Speech-Only (No Slides)
 
 ```bash
-# Single Whisper model (fastest)
-python speech_transcriber.py "https://youtube.com/watch?v=..." --no-api
+# Podcast or interview — skip slide extraction
+python transcriber.py "https://youtube.com/watch?v=..." --no-slides
 
-# Ensemble multiple models (more accurate, still free)
-python speech_transcriber.py "https://youtube.com/watch?v=..." \
-    --whisper-models small,medium --no-api
+# With external transcript for higher accuracy
+python transcriber.py "https://youtube.com/watch?v=..." \
+    --no-slides \
+    --external-transcript "https://example.com/transcript"
 ```
 
-### With API Features
+### Presentation with Slides
 
 ```bash
-# Set API key (or use --api-key flag)
-export ANTHROPIC_API_KEY="your-key-here"
+# Extract slides and interleave with transcript
+python transcriber.py "https://youtube.com/watch?v=..."
 
-# Analyze slides with vision API
-python speech_transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
-
-# Create "critical text" by merging YouTube + Whisper
-python speech_transcriber.py "https://youtube.com/watch?v=..." --merge-sources
-
-# Full pipeline with all features
-python speech_transcriber.py "https://youtube.com/watch?v=..." \
-    --whisper-models small,medium \
-    --merge-sources \
-    --analyze-slides
+# Also describe slide content with vision API
+python transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
 ```
 
 ### Custom Options
 
 ```bash
 # Custom output directory
-python speech_transcriber.py "https://youtube.com/watch?v=..." -o ./my_transcript
+python transcriber.py "https://youtube.com/watch?v=..." -o ./my_transcript
 
-# Use specific Whisper model
-python speech_transcriber.py "https://youtube.com/watch?v=..." --whisper-models large
+# Use specific Whisper models
+python transcriber.py "https://youtube.com/watch?v=..." --whisper-models large
 
-# Adjust slide detection sensitivity (0.0-1.0, lower = more slides)
-python speech_transcriber.py "https://youtube.com/watch?v=..." --scene-threshold 0.15
+# Adjust slide detection sensitivity (0.0–1.0, lower = more slides)
+python transcriber.py "https://youtube.com/watch?v=..." --scene-threshold 0.15
 
 # Force re-processing (ignore existing files)
-python speech_transcriber.py "https://youtube.com/watch?v=..." --no-skip
+python transcriber.py "https://youtube.com/watch?v=..." --no-skip
 
 # Verbose output
-python speech_transcriber.py "https://youtube.com/watch?v=..." -v
+python transcriber.py "https://youtube.com/watch?v=..." -v
 ```
 
 ## Output Files
 
 ```
 output_dir/
-├── speech.mp3                    # Downloaded audio
-├── speech.mp4                    # Downloaded video
-├── speech.en.vtt                 # YouTube captions (if available)
-├── speech_small.txt              # Whisper small transcript
-├── speech_medium.txt             # Whisper medium transcript
-├── speech_ensembled.txt          # Ensembled from multiple models
-├── speech.json                   # Transcript with timestamps
-├── transcript_merged.txt         # Merged with YouTube (if --merge-sources)
-├── slides/
-│   ├── slide_0001.png
-│   ├── slide_0002.png
+├── metadata.json                 # Source URL, title, duration, etc.
+├── audio.mp3                     # Downloaded audio
+├── video.mp4                     # Downloaded video (if slides enabled)
+├── captions.en.vtt               # YouTube captions (if available)
+├── small.txt                     # Whisper small transcript
+├── medium.txt                    # Whisper medium transcript
+├── ensembled.txt                 # Ensembled from multiple Whisper models
+├── medium.json                   # Transcript with timestamps
+├── transcript_merged.txt         # Critical text (merged from all sources)
+├── analysis.md                   # Source survival analysis
+├── transcript.md                 # Final markdown output
+├── merge_chunks/                 # Per-chunk checkpoints (resumable)
+│   ├── .version
+│   ├── chunk_000.json
 │   └── ...
-├── slide_timestamps.json         # When each slide appears
-├── slides_transcript.json        # Slide descriptions (if --analyze-slides)
-└── transcript.md                 # Final markdown with interleaved slides
+└── slides/                       # (if slides enabled)
+    ├── slide_0001.png
+    ├── slide_timestamps.json
+    ├── slides_transcript.json    # (if --analyze-slides)
+    └── ...
 ```
 
 ## Pipeline Stages
 
 | Stage | Tool | API Required |
 |-------|------|--------------|
-| 1. Download | yt-dlp | No |
-| 2. Transcribe | mlx-whisper | No |
+| 1. Download media | yt-dlp | No |
+| 2. Transcribe audio | mlx-whisper | No |
 | 3. Extract slides | ffmpeg | No |
-| 4. Analyze slides | Claude Vision | Yes (optional) |
-| 4b. Merge sources | Claude + wdiff | Yes (optional) |
+| 4a. Ensemble Whisper models | Claude + wdiff | Yes |
+| 4b. Merge transcript sources | Claude + wdiff | Yes |
 | 5. Generate markdown | Python | No |
+| 6. Source survival analysis | wdiff | No |
+
+## How It Works
+
+### Critical Text Merging
+
+The core innovation is treating transcript merging as textual criticism. Given 2–3+ independent "witnesses" to the same speech:
+
+1. **Align** all sources against an anchor text using `wdiff` (longest common subsequence), producing word-position maps that keep chunks synchronized even when sources differ in length
+2. **Chunk** the aligned sources into ~500-word segments
+3. **Present** each chunk to Claude with **anonymous labels** (Source 1, Source 2, Source 3) — source names are never revealed, preventing provenance bias
+4. **Adjudicate** — Claude chooses the best reading at each point of disagreement, preferring proper nouns, grammatical correctness, and contextual fit
+5. **Reassemble** the merged chunks, restoring speaker labels and timestamps from the structured source (if available)
+
+When an external transcript has structure (speaker labels, timestamps), the merge preserves that skeleton while improving the text content from all sources.
+
+### Source Survival Analysis
+
+After merging, `wdiff -s` compares each source against the merged output:
+
+```
+Source                       Words   Common  % of Merged  % of Source
+------------------------- -------- -------- ------------ ------------
+Whisper (ensembled)         28,277   27,441          90%          97%
+YouTube captions            30,668   28,741          94%          94%
+External transcript         33,122   30,245          99%          91%
+Merged output               30,524
+```
+
+This shows how much each source contributed to the final text and which source the merged output most closely resembles.
+
+### Multi-Model Ensembling
+
+When using multiple Whisper models (default: `small,medium`):
+
+1. Runs each model independently
+2. Uses `wdiff` to identify differences (normalized: no caps, no punctuation)
+3. Claude resolves disagreements, preferring real words over transcription errors and proper nouns over generic alternatives
+
+### Make-Style Staleness Checks
+
+Every stage checks `is_up_to_date(output, *inputs)` — if the output file is newer than all input files, the stage is skipped. This means you can re-run the pipeline after changing options and only the affected stages will execute.
 
 ## Cost Estimation
-
-When API features are enabled, the tool displays estimated costs before running:
 
 ```
 ==================================================
 ESTIMATED API COSTS
 ==================================================
-  Slide analysis: 45 slides × $0.02 = $0.90
-  Source merging: ~12000 input words + 6000 output = $0.13
-  Whisper ensemble: 2 models = $0.12
+  Source merging: 3 sources × 59 chunks = $1.03
+  Whisper ensemble: 2 models × 59 chunks = $0.92
 
-  TOTAL: $1.15 (estimate)
-  Note: Actual costs may vary based on transcript length
+  TOTAL: $1.95 (estimate)
 ==================================================
 ```
 
-### Typical Costs (40-minute speech)
+### Typical Costs
 
-| Feature | Estimated Cost |
-|---------|---------------|
-| `--analyze-slides` | $0.50 - $2.00 |
-| `--merge-sources` | $0.10 - $0.30 |
-| `--whisper-models small,medium` | $0.05 - $0.15 |
-| All features | $0.65 - $2.50 |
-| `--no-api` | **Free** |
+| Feature | 20-min speech | 3-hour podcast |
+|---------|--------------|----------------|
+| Whisper ensemble | $0.05–$0.15 | $0.50–$1.00 |
+| Source merging (2 sources) | $0.10–$0.30 | $0.50–$1.00 |
+| Source merging (3 sources) | $0.15–$0.40 | $1.00–$2.00 |
+| Slide analysis | $0.50–$2.00 | N/A |
+| `--no-api` | **Free** | **Free** |
 
-## How It Works
+## Background
 
-### Multi-Model Ensembling
+This tool applies the principles of [textual criticism](https://en.wikipedia.org/wiki/Textual_criticism) — the scholarly discipline of comparing multiple manuscript witnesses to reconstruct an authoritative text — to the problem of speech transcription.
 
-When using multiple Whisper models (e.g., `--whisper-models small,medium`):
+The approach has roots in earlier work on OCR error correction using multiple engine outputs:
 
-1. Runs each model independently
-2. Uses `wdiff` to identify differences (normalized: no caps, no punctuation)
-3. Claude resolves disagreements, preferring:
-   - Real words over transcription errors ("progeria" > "progerium")
-   - Proper nouns and technical terms
-   - Grammatically correct versions
+- **Ringger & Lund (2014)** — [How Well Does Multiple OCR Error Correction Generalize?](https://scholarsarchive.byu.edu/facpub/1647/) Demonstrated that aligning and merging outputs from multiple OCR engines significantly reduces word error rates.
+- **Lund et al. (2013)** — [Error Correction with In-Domain Training Across Multiple OCR System Outputs](https://www.researchgate.net/publication/220861175_Error_Correction_with_In-Domain_Training_Across_Multiple_OCR_System_Outputs). Used A* alignment and trained classifiers (CRFs, MaxEnt) to choose the best reading from multiple OCR witnesses — a 52% relative decrease in word error rate.
 
-### Source Merging
+This tool replaces the trained classifiers with an LLM, which brings world knowledge and contextual reasoning without requiring task-specific training data. The blind/anonymous presentation of sources is borrowed from peer review and prevents the LLM from developing source-level biases.
 
-When using `--merge-sources`:
-
-1. Compares YouTube captions with Whisper transcript via `wdiff`
-2. Identifies meaningful differences (not just formatting)
-3. Claude merges, preferring:
-   - YouTube for proper nouns, names, technical terms
-   - Whisper for punctuation and sentence structure
-   - YouTube for content that Whisper missed
-
-### Timestamp-Based Slide Placement
-
-1. Whisper provides word-level timestamps (JSON output)
-2. ffmpeg reports when each scene change occurs
-3. Slides are inserted into transcript at the moment they appeared in the video
-
-## Command Reference
-
-```
-usage: speech_transcriber.py [-h] [-o OUTPUT_DIR]
-                             [--whisper-models WHISPER_MODELS]
-                             [--scene-threshold SCENE_THRESHOLD]
-                             [--analyze-slides] [--merge-sources]
-                             [--api-key API_KEY] [--no-api] [--no-skip] [-v]
-                             url
-
-positional arguments:
-  url                   URL of the speech video
-
-options:
-  -h, --help            show this help message and exit
-  -o OUTPUT_DIR         Output directory (default: ./transcripts/<title>)
-  --whisper-models      Model(s) to use, comma-separated (default: medium)
-                        Options: tiny, base, small, medium, large
-  --scene-threshold     Scene detection threshold 0-1 (default: 0.1)
-  --analyze-slides      Use Claude vision API to analyze slides
-  --merge-sources       Merge YouTube captions with Whisper transcript
-  --api-key             Anthropic API key (or set ANTHROPIC_API_KEY env var)
-  --no-api              Skip all API-dependent features
-  --no-skip             Re-process even if files exist
-  -v, --verbose         Show detailed command output
-```
+Related work in speech:
+- **ROVER** ([Fiscus, 1997](https://ieeexplore.ieee.org/document/659110/)) — Statistical voting across multiple ASR outputs via word transition networks
+- **Ensemble Methods for ASR** ([Lehmann](https://github.com/cassandra-lehmann/ensemble_methods_ASR_transcripts)) — Random Forest classifier for selecting words from multiple ASR systems
 
 ## Troubleshooting
 
 ### "No Whisper implementation found"
-
-Install either mlx-whisper (Apple Silicon) or openai-whisper:
 
 ```bash
 pip install mlx-whisper    # Apple Silicon (recommended)
 pip install openai-whisper # Other platforms
 ```
 
-### ffmpeg scene detection captures too few/many slides
-
-Adjust the threshold:
-- Lower value (e.g., `0.05`) = more sensitive, more slides
-- Higher value (e.g., `0.2`) = less sensitive, fewer slides
-
-```bash
-python speech_transcriber.py "..." --scene-threshold 0.05
-```
-
 ### wdiff not found
 
-The tool works without wdiff but comparison is less precise:
+Required for alignment-based merging:
 
 ```bash
 brew install wdiff  # macOS
 apt install wdiff   # Ubuntu/Debian
 ```
 
-### API rate limits
+### API timeouts
 
-For long speeches or many slides, you may hit rate limits. The tool processes sequentially to minimize this, but you can:
+The tool retries on timeouts (120s per attempt, up to 5 retries with exponential backoff). Long merges save per-chunk checkpoints, so interrupted runs resume from the last completed chunk.
 
-1. Run with `--no-api` first to get basic transcript
-2. Run again with API features (existing files are skipped)
+### ffmpeg scene detection captures too few/many slides
+
+```bash
+python transcriber.py "..." --scene-threshold 0.05  # More slides
+python transcriber.py "..." --scene-threshold 0.20  # Fewer slides
+```
 
 ## License
 
@@ -256,7 +250,8 @@ MIT
 
 ## Acknowledgments
 
-- [OpenAI Whisper](https://github.com/openai/whisper) - Speech recognition
-- [MLX Whisper](https://github.com/ml-explore/mlx-examples) - Apple Silicon optimization
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Media downloading
-- [Anthropic Claude](https://www.anthropic.com/) - Vision and text analysis
+- [OpenAI Whisper](https://github.com/openai/whisper) — Speech recognition
+- [MLX Whisper](https://github.com/ml-explore/mlx-examples) — Apple Silicon optimization
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — Media downloading
+- [Anthropic Claude](https://www.anthropic.com/) — LLM-based adjudication and vision analysis
+- [wdiff](https://www.gnu.org/software/wdiff/) — Word-level diff for alignment and comparison
