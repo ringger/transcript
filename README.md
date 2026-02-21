@@ -204,12 +204,13 @@ ESTIMATED API COSTS
 
 This tool applies the principles of [textual criticism](https://en.wikipedia.org/wiki/Textual_criticism) — the scholarly discipline of comparing multiple manuscript witnesses to reconstruct an authoritative text — to the problem of speech transcription.
 
-The approach has roots in earlier work on OCR error correction using multiple engine outputs:
+The approach has roots in earlier work applying noisy-channel models and multi-source correction to speech and OCR:
 
+- **Ringger & Allen (1996)** — [Error Correction via a Post-Processor for Continuous Speech Recognition](https://www.researchgate.net/publication/2321329_Error_Correction_Via_A_Post-Processor_For_Continuous_Speech_Recognition) (ICASSP). Introduced SpeechPP, a noisy-channel post-processor that corrects ASR output using language and channel models with Viterbi beam search, developed as part of the [TRAINS/TRIPS](https://www.cs.rochester.edu/research/trains/) spoken dialogue systems at the University of Rochester. Extended with a fertility channel model in [Ringger & Allen, ICSLP 1996](https://scholarsarchive.byu.edu/facpub/1288/).
 - **Ringger & Lund (2014)** — [How Well Does Multiple OCR Error Correction Generalize?](https://scholarsarchive.byu.edu/facpub/1647/) Demonstrated that aligning and merging outputs from multiple OCR engines significantly reduces word error rates.
 - **Lund et al. (2013)** — [Error Correction with In-Domain Training Across Multiple OCR System Outputs](https://www.researchgate.net/publication/220861175_Error_Correction_with_In-Domain_Training_Across_Multiple_OCR_System_Outputs). Used A* alignment and trained classifiers (CRFs, MaxEnt) to choose the best reading from multiple OCR witnesses — a 52% relative decrease in word error rate.
 
-This tool replaces the trained classifiers with an LLM, which brings world knowledge and contextual reasoning without requiring task-specific training data. The blind/anonymous presentation of sources is borrowed from peer review and prevents the LLM from developing source-level biases.
+The OCR work used A* alignment because page layout provides natural line boundaries, making alignment a series of short, bounded search problems. Speech has no such boundaries — different ASR systems segment a continuous audio stream arbitrarily — so this tool uses `wdiff` (LCS-based global alignment) instead. It also replaces the trained classifiers with an LLM, which brings world knowledge and contextual reasoning without requiring task-specific training data. The blind/anonymous presentation of sources is borrowed from peer review and prevents the LLM from developing source-level biases.
 
 Related work in speech:
 - **ROVER** ([Fiscus, 1997](https://ieeexplore.ieee.org/document/659110/)) — Statistical voting across multiple ASR outputs via word transition networks
