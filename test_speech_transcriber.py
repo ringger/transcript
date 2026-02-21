@@ -9,7 +9,6 @@ import pytest
 
 from speech_transcriber import (
     MERGE_CHECKPOINT_VERSION,
-    MERGE_CHUNK_WORDS,
     SpeechConfig,
     SpeechData,
     _build_alignments,
@@ -403,15 +402,19 @@ class TestDryRunSkip:
 # ---------------------------------------------------------------------------
 
 class TestApiCallWithRetry:
-    def test_success_on_first_try(self):
+    @pytest.fixture
+    def cfg(self, tmp_path):
+        return SpeechConfig(url="x", output_dir=tmp_path)
+
+    def test_success_on_first_try(self, cfg):
         client = MagicMock()
         client.messages.create.return_value = "ok"
-        result = api_call_with_retry(client, model="test", max_tokens=100, messages=[])
+        result = api_call_with_retry(client, cfg, model="test", max_tokens=100, messages=[])
         assert result == "ok"
         assert client.messages.create.call_count == 1
 
     @patch("speech_transcriber.time.sleep")
-    def test_retries_on_529(self, mock_sleep):
+    def test_retries_on_529(self, mock_sleep, cfg):
         import anthropic
 
         client = MagicMock()
@@ -421,13 +424,13 @@ class TestApiCallWithRetry:
             body={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
         )
         client.messages.create.side_effect = [error, error, "ok"]
-        result = api_call_with_retry(client, model="test", max_tokens=100, messages=[])
+        result = api_call_with_retry(client, cfg, model="test", max_tokens=100, messages=[])
         assert result == "ok"
         assert client.messages.create.call_count == 3
         assert mock_sleep.call_count == 2
 
     @patch("speech_transcriber.time.sleep")
-    def test_exponential_backoff(self, mock_sleep):
+    def test_exponential_backoff(self, mock_sleep, cfg):
         import anthropic
 
         client = MagicMock()
@@ -437,12 +440,12 @@ class TestApiCallWithRetry:
             body={"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}},
         )
         client.messages.create.side_effect = [error, error, error, "ok"]
-        api_call_with_retry(client, model="test", max_tokens=100, messages=[])
+        api_call_with_retry(client, cfg, model="test", max_tokens=100, messages=[])
         delays = [call.args[0] for call in mock_sleep.call_args_list]
         assert delays == [5, 10, 20]
 
     @patch("speech_transcriber.time.sleep")
-    def test_raises_after_max_retries(self, mock_sleep):
+    def test_raises_after_max_retries(self, mock_sleep, cfg):
         import anthropic
 
         client = MagicMock()
@@ -453,10 +456,10 @@ class TestApiCallWithRetry:
         )
         client.messages.create.side_effect = error
         with pytest.raises(anthropic.APIStatusError):
-            api_call_with_retry(client, model="test", max_tokens=100, messages=[])
+            api_call_with_retry(client, cfg, model="test", max_tokens=100, messages=[])
         assert client.messages.create.call_count == 5
 
-    def test_non_retryable_error_raises_immediately(self):
+    def test_non_retryable_error_raises_immediately(self, cfg):
         import anthropic
 
         client = MagicMock()
@@ -467,7 +470,7 @@ class TestApiCallWithRetry:
         )
         client.messages.create.side_effect = error
         with pytest.raises(anthropic.APIStatusError):
-            api_call_with_retry(client, model="test", max_tokens=100, messages=[])
+            api_call_with_retry(client, cfg, model="test", max_tokens=100, messages=[])
         assert client.messages.create.call_count == 1
 
 
@@ -838,6 +841,19 @@ class TestBuildWdiffAlignment:
         assert alignment[11] == 12  # "and"
         assert alignment[len(a_words)] == len(b_words)  # sentinel
 
+    def test_punctuation_only_tokens_preserve_word_count(self, tmp_path):
+        """Standalone punctuation tokens (em-dashes, ellipses) must not
+        cause alignment map size to diverge from original word count."""
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        text_a = "hello — world ... end"  # 5 words, 2 are punctuation-only
+        text_b = "hello world end"
+        alignment = _build_wdiff_alignment(text_a, text_b, config)
+        # Alignment map must have len(text_a.split()) + 1 entries
+        assert len(alignment) == 6  # 5 words + 1 sentinel
+        # Accessing all positions should not raise IndexError
+        for i in range(len(text_a.split())):
+            _ = alignment[i]
+
 
 # ---------------------------------------------------------------------------
 # Integration: _merge_structured end-to-end (with real wdiff)
@@ -1148,7 +1164,8 @@ class TestCheckpointFileIntegrity:
         Returns (segments, all_sources) where all_sources includes an
         External Transcript (required by the blind merge) plus two others.
         """
-        words_per_seg = MERGE_CHUNK_WORDS // 2  # 2 segments per chunk
+        config = SpeechConfig(url="x", output_dir=Path("/tmp"))
+        words_per_seg = config.merge_chunk_words // 2  # 2 segments per chunk
         segments = []
         for i in range(num_segments):
             segments.append({

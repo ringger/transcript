@@ -55,11 +55,6 @@ import shutil
 import functools
 print = functools.partial(print, flush=True)
 
-# Max words per chunk for merge API calls. Smaller chunks mean more focused
-# wdiff analysis and fewer differences per prompt (no cap on diff count).
-MERGE_CHUNK_WORDS = 1000
-
-
 @dataclass
 class SpeechConfig:
     """Configuration for speech transcription pipeline."""
@@ -77,6 +72,11 @@ class SpeechConfig:
     external_transcript: Optional[str] = None  # External transcript file path or URL to include in merge
     dry_run: bool = False  # Show what would be done without doing it
     verbose: bool = False
+    # Merge tuning
+    merge_chunk_words: int = 500  # Words per chunk for merge API calls
+    api_max_retries: int = 5
+    api_initial_backoff: int = 5  # seconds
+    api_timeout: float = 120.0  # seconds per API attempt
 
 
 @dataclass
@@ -123,23 +123,31 @@ def run_command(cmd: list[str], description: str, verbose: bool = False) -> subp
         raise
 
 
-API_MAX_RETRIES = 5
-API_INITIAL_BACKOFF = 5  # seconds
 
 
-def api_call_with_retry(client, **kwargs) -> object:
+def api_call_with_retry(client, config: SpeechConfig, **kwargs) -> object:
     """Call client.messages.create with exponential backoff on transient errors.
 
-    Retries on 429 (rate limit), 529 (overloaded), and 500 (internal server error).
+    Retries on 429 (rate limit), 529 (overloaded), 500 (internal server error),
+    and timeouts (APITimeoutError).
     """
     import anthropic
-    delay = API_INITIAL_BACKOFF
-    for attempt in range(1, API_MAX_RETRIES + 1):
+    if "timeout" not in kwargs:
+        kwargs["timeout"] = config.api_timeout
+    delay = config.api_initial_backoff
+    for attempt in range(1, config.api_max_retries + 1):
         try:
             return client.messages.create(**kwargs)
+        except anthropic.APITimeoutError:
+            if attempt < config.api_max_retries:
+                print(f"    API timeout, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
         except anthropic.APIStatusError as e:
-            if e.status_code in (429, 529, 500) and attempt < API_MAX_RETRIES:
-                print(f"  API {e.status_code} error, retrying in {delay}s (attempt {attempt}/{API_MAX_RETRIES})...")
+            if e.status_code in (429, 529, 500) and attempt < config.api_max_retries:
+                print(f"  API {e.status_code} error, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
                 time.sleep(delay)
                 delay *= 2
             else:
@@ -208,7 +216,7 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
         if config.external_transcript:
             num_sources += 1
         # Each chunk sends all sources as input, output ≈ 1x base transcript
-        num_chunks = max(1, transcript_words // MERGE_CHUNK_WORDS + 1)
+        num_chunks = max(1, transcript_words // config.merge_chunk_words + 1)
         # Input per chunk: all sources (~transcript_words * num_sources / num_chunks)
         #   + wdiff differences summary (~500 tokens overhead)
         # Output per chunk: ~transcript_words / num_chunks
@@ -226,7 +234,7 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
     if len(config.whisper_models) > 1 and not config.no_api:
         # Ensemble: chunked processing, each chunk sends base + other models + diffs
         num_models = len(config.whisper_models)
-        num_chunks = max(1, transcript_words // MERGE_CHUNK_WORDS + 1)
+        num_chunks = max(1, transcript_words // config.merge_chunk_words + 1)
         chunk_input_words = transcript_words * num_models // num_chunks + 500
         chunk_output_words = transcript_words // num_chunks
         total_input_tokens = int(chunk_input_words * num_chunks * 1.3)
@@ -289,6 +297,24 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
     data.title = info.get("title", "speech")
 
     print(f"  Title: {data.title}")
+
+    # Save source metadata
+    metadata_path = config.output_dir / "metadata.json"
+    if not metadata_path.exists() or not config.skip_existing:
+        metadata = {
+            "url": config.url,
+            "video_id": info.get("id"),
+            "title": data.title,
+            "channel": info.get("channel") or info.get("uploader"),
+            "upload_date": info.get("upload_date"),
+            "duration_seconds": info.get("duration"),
+            "description": info.get("description", "")[:500],
+        }
+        if config.external_transcript:
+            metadata["external_transcript"] = config.external_transcript
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"  Metadata saved: {metadata_path.name}")
 
     # Download audio
     audio_path = config.output_dir / "audio.mp3"
@@ -552,8 +578,7 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
             ensembled_text = base_text
         elif api_key:
             ensembled_text = _resolve_whisper_differences(
-                api_key, base_text, transcripts, all_differences,
-                config.claude_model, config.verbose
+                api_key, base_text, transcripts, all_differences, config
             )
         else:
             print("  No API key - using base model without resolving differences")
@@ -576,8 +601,7 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
 
 
 def _resolve_whisper_differences(api_key: str, base_text: str, all_transcripts: dict,
-                                  differences: list, claude_model: str = "claude-sonnet-4-20250514",
-                                  verbose: bool = False) -> str:
+                                  differences: list, config: SpeechConfig) -> str:
     """Use Claude to resolve differences between Whisper model outputs."""
 
     # Format differences for Claude
@@ -594,21 +618,20 @@ def _resolve_whisper_differences(api_key: str, base_text: str, all_transcripts: 
                 diff_summary += f"{i}. {d['source']} has: \"{d['text']}\" (missing in other)\n"
 
     # Split into chunks if transcript is long
-    max_chunk_words = MERGE_CHUNK_WORDS
     base_words = base_text.split()
 
-    if len(base_words) <= max_chunk_words:
+    if len(base_words) <= config.merge_chunk_words:
         return _resolve_whisper_chunk(api_key, base_text, all_transcripts,
-                                      diff_summary, claude_model, verbose)
+                                      diff_summary, config)
 
     # Process in chunks
-    num_chunks = (len(base_words) // max_chunk_words) + 1
+    num_chunks = (len(base_words) // config.merge_chunk_words) + 1
     print(f"  Splitting ensembling into {num_chunks} chunks...")
     merged_chunks = []
 
     for i in range(num_chunks):
-        start_idx = i * max_chunk_words
-        end_idx = min((i + 1) * max_chunk_words, len(base_words))
+        start_idx = i * config.merge_chunk_words
+        end_idx = min((i + 1) * config.merge_chunk_words, len(base_words))
         base_chunk = " ".join(base_words[start_idx:end_idx])
 
         # Proportionally slice other transcripts
@@ -622,15 +645,14 @@ def _resolve_whisper_differences(api_key: str, base_text: str, all_transcripts: 
 
         print(f"  Ensembling chunk {i+1}/{num_chunks}...")
         chunk_result = _resolve_whisper_chunk(api_key, base_chunk, other_chunks,
-                                              diff_summary, claude_model, verbose)
+                                              diff_summary, config)
         merged_chunks.append(chunk_result)
 
     return "\n\n".join(merged_chunks)
 
 
 def _resolve_whisper_chunk(api_key: str, base_text: str, all_transcripts: dict,
-                            diff_summary: str, claude_model: str = "claude-sonnet-4-20250514",
-                            verbose: bool = False) -> str:
+                            diff_summary: str, config: SpeechConfig) -> str:
     """Use Claude to resolve differences in a chunk of Whisper model outputs."""
     import anthropic
 
@@ -666,8 +688,8 @@ INSTRUCTIONS:
 Output the ensembled transcript:"""
 
     message = api_call_with_retry(
-        client,
-        model=claude_model,
+        client, config,
+        model=config.claude_model,
         max_tokens=16384,
         messages=[
             {"role": "user", "content": prompt}
@@ -837,7 +859,7 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
 
         # Call Claude vision API
         message = api_call_with_retry(
-            client,
+            client, config,
             model=config.claude_model,
             max_tokens=1024,
             messages=[
@@ -1132,14 +1154,18 @@ def _extract_text_from_html(html: str) -> str:
 
 
 def _normalize_for_comparison(text: str) -> str:
-    """Normalize text for comparison: lowercase, remove punctuation."""
-    # Remove punctuation
-    text = re.sub(r'[^\w\s]', '', text)
-    # Lowercase
-    text = text.lower()
-    # Normalize whitespace
-    text = ' '.join(text.split())
-    return text
+    """Normalize text for comparison: lowercase, strip punctuation per-word.
+
+    Preserves word count: punctuation-only tokens (em-dashes, ellipses, etc.)
+    are replaced with a placeholder so alignment maps stay in sync with
+    original word positions.
+    """
+    words = text.split()
+    normalized = []
+    for w in words:
+        cleaned = re.sub(r'[^\w]', '', w).lower()
+        normalized.append(cleaned if cleaned else '_')
+    return ' '.join(normalized)
 
 
 def _analyze_differences_wdiff(text_a: str, text_b: str, config: SpeechConfig,
@@ -1461,7 +1487,7 @@ def _parse_structured_transcript(text: str, fmt: str) -> list:
     return segments
 
 
-MERGE_CHECKPOINT_VERSION = "4"
+MERGE_CHECKPOINT_VERSION = "5"
 
 
 def _init_merge_chunks_dir(config: SpeechConfig) -> Path:
@@ -1624,7 +1650,7 @@ def _merge_structured(api_key: str, skeleton_segments: list, all_sources: list,
     current_word_count = 0
     for seg_idx, seg in enumerate(skeleton_segments):
         seg_words = len(seg["text"].split())
-        if current_word_count + seg_words > MERGE_CHUNK_WORDS and current_chunk:
+        if current_word_count + seg_words > config.merge_chunk_words and current_chunk:
             chunks.append(current_chunk)
             current_chunk = []
             current_word_count = 0
@@ -1633,7 +1659,7 @@ def _merge_structured(api_key: str, skeleton_segments: list, all_sources: list,
     if current_chunk:
         chunks.append(current_chunk)
 
-    print(f"  Merging in {len(chunks)} chunks (~{MERGE_CHUNK_WORDS} words each)...")
+    print(f"  Merging in {len(chunks)} chunks (~{config.merge_chunk_words} words each)...")
 
     # Step 5: Check for reusable checkpoints
     corrected_segments = [None] * len(skeleton_segments)
@@ -1661,7 +1687,8 @@ def _merge_structured(api_key: str, skeleton_segments: list, all_sources: list,
         if chunk_idx < chunks_reused:
             continue
 
-        print(f"  Merging chunk {chunk_idx + 1}/{len(chunks)} via API ({len(seg_indices)} passages)...")
+        chunk_words = sum(len(seg["text"].split()) for seg in (skeleton_segments[i] for i in seg_indices))
+        print(f"  Merging chunk {chunk_idx + 1}/{len(chunks)} via API ({len(seg_indices)} passages, ~{chunk_words} words/source)...")
 
         # Build anonymous passage text
         passage_texts = ""
@@ -1696,14 +1723,18 @@ No source is more reliable than any other — judge each difference on its merit
 
 Output the merged passages:"""
 
+        prompt_words = len(prompt.split())
+        print(f"    Prompt: ~{prompt_words} words ({len(prompt)} chars)")
+
         message = api_call_with_retry(
-            client,
+            client, config,
             model=config.claude_model,
             max_tokens=16384,
             messages=[{"role": "user", "content": prompt}]
         )
 
         response = message.content[0].text.strip()
+        print(f"    Response: {len(response)} chars, usage: {message.usage.input_tokens} in / {message.usage.output_tokens} out")
 
         # Parse response: PASSAGE N: text
         passage_pattern = re.compile(
@@ -1770,12 +1801,12 @@ def _merge_multi_source(api_key: str, sources: list,
     chunks = []  # list of (start, end) word indices in anchor
     pos = 0
     while pos < len(anchor_words):
-        end = min(pos + MERGE_CHUNK_WORDS, len(anchor_words))
+        end = min(pos + config.merge_chunk_words, len(anchor_words))
         chunks.append((pos, end))
         pos = end
 
     num_chunks = len(chunks)
-    print(f"  Merging in {num_chunks} chunks (~{MERGE_CHUNK_WORDS} words each)...")
+    print(f"  Merging in {num_chunks} chunks (~{config.merge_chunk_words} words each)...")
 
     # Check for reusable checkpoints
     merged_chunks = []
@@ -1796,7 +1827,8 @@ def _merge_multi_source(api_key: str, sources: list,
         if chunk_idx < chunks_reused:
             continue
 
-        print(f"  Merging chunk {chunk_idx + 1}/{num_chunks} via API...")
+        chunk_words = end - start
+        print(f"  Merging chunk {chunk_idx + 1}/{num_chunks} via API (~{chunk_words} words/source)...")
 
         # Extract aligned text for this chunk from all sources
         chunk_texts = _extract_aligned_chunk(anchor_words, start, end,
@@ -1826,14 +1858,18 @@ No source is more reliable than any other — judge each difference on its merit
 
 Output the merged transcript:"""
 
+        prompt_words = len(prompt.split())
+        print(f"    Prompt: ~{prompt_words} words ({len(prompt)} chars)")
+
         message = api_call_with_retry(
-            client,
+            client, config,
             model=config.claude_model,
             max_tokens=16384,
             messages=[{"role": "user", "content": prompt}]
         )
 
         chunk_merged = message.content[0].text.strip()
+        print(f"    Response: {len(chunk_merged)} chars, usage: {message.usage.input_tokens} in / {message.usage.output_tokens} out")
         _save_chunk_checkpoint(chunks_dir, chunk_idx, chunk_merged)
         merged_chunks.append(chunk_merged)
 
