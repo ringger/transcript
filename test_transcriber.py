@@ -1,106 +1,22 @@
-"""Tests for transcriber.py — pipeline stages, VTT cleaning, markdown, and CLI logic."""
+"""Tests for transcriber.py — merge orchestration, cost estimation, and CLI logic."""
 
+import re
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from shared import SpeechConfig, SpeechData, is_up_to_date
-
 from merge import _format_structured_segments
-
+from download import clean_vtt_captions
+from output import generate_markdown
 from transcriber import (
-    _dry_run_skip,
-    _ensemble_whisper_transcripts,
-    _format_paragraph,
-    _generate_interleaved_markdown,
-    _generate_sequential_markdown,
-    _get_best_transcript_text,
-    _load_transcript_segments,
-    _resolve_whisper_chunk,
-    _resolve_whisper_differences,
+    _load_external_transcript,
     _strip_structured_headers,
-    analyze_slides_with_vision,
     analyze_source_survival,
-    clean_vtt_captions,
     estimate_api_cost,
-    extract_slides,
-    generate_markdown,
     merge_transcript_sources,
-    transcribe_audio,
 )
-
-
-# ---------------------------------------------------------------------------
-# clean_vtt_captions
-# ---------------------------------------------------------------------------
-
-class TestCleanVttCaptions:
-    def test_basic_vtt(self, tmp_path):
-        vtt = tmp_path / "captions.vtt"
-        vtt.write_text(
-            "WEBVTT\n"
-            "Kind: captions\n"
-            "Language: en\n"
-            "\n"
-            "00:00:01.000 --> 00:00:03.000\n"
-            "Hello world.\n"
-            "\n"
-            "00:00:03.000 --> 00:00:05.000\n"
-            "This is a test.\n"
-        )
-        result = clean_vtt_captions(vtt)
-        assert "Hello world." in result
-        assert "This is a test." in result
-        assert "WEBVTT" not in result
-        assert "-->" not in result
-
-    def test_deduplication(self, tmp_path):
-        vtt = tmp_path / "captions.vtt"
-        vtt.write_text(
-            "WEBVTT\n\n"
-            "00:00:01.000 --> 00:00:03.000\n"
-            "Hello world.\n\n"
-            "00:00:03.000 --> 00:00:05.000\n"
-            "Hello world.\n"
-        )
-        result = clean_vtt_captions(vtt)
-        assert result.count("Hello world.") == 1
-
-    def test_strips_html_tags(self, tmp_path):
-        vtt = tmp_path / "captions.vtt"
-        vtt.write_text(
-            "WEBVTT\n\n"
-            "00:00:01.000 --> 00:00:03.000\n"
-            "<c>Hello</c> <i>world</i>.\n"
-        )
-        result = clean_vtt_captions(vtt)
-        assert "<c>" not in result
-        assert "<i>" not in result
-        assert "Hello world." in result
-
-
-# ---------------------------------------------------------------------------
-# _dry_run_skip
-# ---------------------------------------------------------------------------
-
-class TestDryRunSkip:
-    def test_returns_false_when_not_dry_run(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=False)
-        assert _dry_run_skip(config, "do thing", "out.txt") is False
-
-    def test_returns_true_when_dry_run(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True)
-        assert _dry_run_skip(config, "do thing", "out.txt") is True
-
-    def test_prints_message_when_dry_run(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True)
-        _dry_run_skip(config, "merge sources", "merged.txt")
-        captured = capsys.readouterr()
-        assert "[dry-run]" in captured.out
-        assert "merge sources" in captured.out
-        assert "merged.txt" in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -324,621 +240,81 @@ class TestEstimateApiCost:
 
 
 # ---------------------------------------------------------------------------
-# _load_transcript_segments
+# _load_external_transcript
 # ---------------------------------------------------------------------------
 
-import json
+class TestLoadExternalTranscript:
+    def test_local_file_exists(self, tmp_path):
+        f = tmp_path / "transcript.txt"
+        f.write_text("  Hello world  ")
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript=str(f))
+        text, label = _load_external_transcript(config)
+        assert text == "Hello world"
+        assert label == "transcript.txt"
 
-class TestLoadTranscriptSegments:
-    def test_loads_segments_from_json(self, tmp_path):
-        json_path = tmp_path / "transcript.json"
-        json_path.write_text(json.dumps({
-            "segments": [
-                {"start": 0.0, "end": 1.5, "text": "Hello world"},
-                {"start": 1.5, "end": 3.0, "text": "Second segment"},
-            ]
-        }))
-        data = SpeechData()
-        data.transcript_json_path = json_path
-        _load_transcript_segments(data)
-        assert len(data.transcript_segments) == 2
-        assert data.transcript_segments[0]["text"] == "Hello world"
-        assert data.transcript_segments[0]["start"] == 0.0
-        assert data.transcript_segments[1]["end"] == 3.0
+    def test_local_file_missing(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript=str(tmp_path / "nope.txt"))
+        text, label = _load_external_transcript(config)
+        assert text is None
+        assert label == "nope.txt"
 
-    def test_skips_empty_text_segments(self, tmp_path):
-        json_path = tmp_path / "transcript.json"
-        json_path.write_text(json.dumps({
-            "segments": [
-                {"start": 0.0, "end": 1.0, "text": "Good"},
-                {"start": 1.0, "end": 2.0, "text": "  "},
-                {"start": 2.0, "end": 3.0, "text": ""},
-            ]
-        }))
-        data = SpeechData()
-        data.transcript_json_path = json_path
-        _load_transcript_segments(data)
-        assert len(data.transcript_segments) == 1
-        assert data.transcript_segments[0]["text"] == "Good"
+    @patch("urllib.request.urlopen")
+    def test_url_plain_text(self, mock_urlopen, tmp_path):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"Plain transcript text"
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
 
-    def test_no_json_path_is_noop(self):
-        data = SpeechData()
-        data.transcript_json_path = None
-        _load_transcript_segments(data)
-        assert data.transcript_segments == []
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript="https://example.com/transcript.txt")
+        text, label = _load_external_transcript(config)
+        assert text == "Plain transcript text"
+        assert label == "transcript.txt"
 
-    def test_missing_file_is_noop(self, tmp_path):
-        data = SpeechData()
-        data.transcript_json_path = tmp_path / "nonexistent.json"
-        _load_transcript_segments(data)
-        assert data.transcript_segments == []
+    @patch("transcriber._extract_text_from_html", return_value="Extracted text")
+    @patch("urllib.request.urlopen")
+    def test_url_html_calls_extract(self, mock_urlopen, mock_extract, tmp_path):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"<html><body>Some HTML</body></html>"
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
 
-    def test_malformed_json_does_not_raise(self, tmp_path):
-        json_path = tmp_path / "bad.json"
-        json_path.write_text("not json at all {{{")
-        data = SpeechData()
-        data.transcript_json_path = json_path
-        _load_transcript_segments(data)  # should not raise
-        assert data.transcript_segments == []
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript="https://example.com/page")
+        text, label = _load_external_transcript(config)
+        assert text == "Extracted text"
+        mock_extract.assert_called_once()
 
-    def test_missing_fields_use_defaults(self, tmp_path):
-        json_path = tmp_path / "transcript.json"
-        json_path.write_text(json.dumps({
-            "segments": [
-                {"text": "No times here"},
-            ]
-        }))
-        data = SpeechData()
-        data.transcript_json_path = json_path
-        _load_transcript_segments(data)
-        assert len(data.transcript_segments) == 1
-        assert data.transcript_segments[0]["start"] == 0
-        assert data.transcript_segments[0]["end"] == 0
-
-
-# ---------------------------------------------------------------------------
-# _format_paragraph
-# ---------------------------------------------------------------------------
-
-class TestFormatParagraph:
-    def test_short_text_no_splitting(self):
-        result = _format_paragraph("One sentence. Two sentence.")
-        assert result == "One sentence. Two sentence."
-
-    def test_splits_at_three_sentences(self):
-        text = "First. Second. Third. Fourth. Fifth. Sixth."
-        result = _format_paragraph(text)
-        parts = result.split("\n\n")
-        assert len(parts) == 2
-        assert "First. Second. Third." in parts[0]
-        assert "Fourth. Fifth. Sixth." in parts[1]
-
-    def test_preserves_sentence_boundaries(self):
-        text = "Hello world. This is a test. Another one here. And a fourth."
-        result = _format_paragraph(text)
-        # Should not break mid-sentence
-        for part in result.split("\n\n"):
-            assert part.rstrip().endswith(".")
-
-    def test_handles_question_and_exclamation(self):
-        text = "What is this? I love it! Great. Next one? Yes! Done."
-        result = _format_paragraph(text)
-        parts = result.split("\n\n")
-        assert len(parts) == 2
-
-    def test_single_sentence(self):
-        result = _format_paragraph("Just one sentence here.")
-        assert result == "Just one sentence here."
-
-    def test_empty_string(self):
-        result = _format_paragraph("")
-        assert result == ""
-
-
-# ---------------------------------------------------------------------------
-# Whisper ensembling: _resolve_whisper_chunk
-# ---------------------------------------------------------------------------
-
-class TestResolveWhisperChunk:
-    """Test _resolve_whisper_chunk with mocked LLM."""
-
-    @patch("transcriber.create_llm_client")
-    @patch("transcriber.llm_call_with_retry")
-    def test_basic_resolution(self, mock_llm, mock_client, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        base_text = "Hello world"
-        all_transcripts = {"medium": "Hello world", "small": "Hello worlds"}
-        diff_summary = "1. small has 'worlds' vs medium has 'world'"
-
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock()]
-        mock_resp.content[0].text = "Hello world"
-        mock_llm.return_value = mock_resp
-
-        result = _resolve_whisper_chunk(base_text, all_transcripts, diff_summary, config)
-        assert result == "Hello world"
-        mock_llm.assert_called_once()
-
-    @patch("transcriber.create_llm_client")
-    @patch("transcriber.llm_call_with_retry")
-    def test_prompt_contains_base_and_diffs(self, mock_llm, mock_client, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        base_text = "The quick brown fox"
-        all_transcripts = {"medium": base_text, "small": "A quick brown fox"}
-        diff_summary = "1. small: 'A' vs medium: 'The'"
-
-        captured_kwargs = {}
-        def capture_call(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            msg = MagicMock()
-            msg.content = [MagicMock()]
-            msg.content[0].text = "The quick brown fox"
-            return msg
-        mock_llm.side_effect = capture_call
-
-        _resolve_whisper_chunk(base_text, all_transcripts, diff_summary, config)
-        prompt = captured_kwargs["messages"][0]["content"]
-        assert "The quick brown fox" in prompt
-        assert "SMALL MODEL" in prompt
-        assert diff_summary in prompt
-
-    @patch("transcriber.create_llm_client")
-    @patch("transcriber.llm_call_with_retry")
-    def test_strips_whitespace(self, mock_llm, mock_client, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock()]
-        mock_resp.content[0].text = "  result with spaces  \n"
-        mock_llm.return_value = mock_resp
-
-        result = _resolve_whisper_chunk("base", {"m": "base"}, "", config)
-        assert result == "result with spaces"
-
-
-# ---------------------------------------------------------------------------
-# Whisper ensembling: _resolve_whisper_differences
-# ---------------------------------------------------------------------------
-
-class TestResolveWhisperDifferences:
-    """Test _resolve_whisper_differences chunking and diff formatting."""
-
-    @patch("transcriber._resolve_whisper_chunk")
-    def test_short_text_single_chunk(self, mock_chunk, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=500)
-        base_text = "short text here"
-        transcripts = {"medium": base_text, "small": "short texts here"}
-        diffs = [{"type": "changed", "a_text": "texts", "b_text": "text",
-                  "a_source": "small", "b_source": "medium"}]
-        mock_chunk.return_value = "short text here"
-
-        result = _resolve_whisper_differences(base_text, transcripts, diffs, config)
-        assert result == "short text here"
-        mock_chunk.assert_called_once()
-
-    @patch("transcriber._resolve_whisper_chunk")
-    def test_long_text_multiple_chunks(self, mock_chunk, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=10)
-        base_text = "word " * 25  # 25 words, should split into 3 chunks
-        transcripts = {"medium": base_text, "small": base_text}
-        diffs = [{"type": "a_only", "text": "extra", "source": "small"}]
-        mock_chunk.return_value = "chunk result"
-
-        result = _resolve_whisper_differences(base_text, transcripts, diffs, config)
-        assert mock_chunk.call_count == 3
-        assert "chunk result" in result
-
-    @patch("transcriber._resolve_whisper_chunk")
-    def test_diff_summary_formatting(self, mock_chunk, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=500)
-        diffs = [
-            {"type": "changed", "a_text": "foo", "b_text": "bar",
-             "a_source": "small", "b_source": "medium"},
-            {"type": "a_only", "text": "extra", "source": "small"},
-            {"type": "b_only", "text": "bonus", "source": "medium"},
-        ]
-        mock_chunk.return_value = "result"
-
-        _resolve_whisper_differences("text", {"m": "text"}, diffs, config)
-        call_args = mock_chunk.call_args
-        diff_summary = call_args[0][2]  # Third positional arg
-        assert 'small has "foo"' in diff_summary
-        assert 'medium has "bar"' in diff_summary
-        assert '"extra"' in diff_summary
-        assert '"bonus"' in diff_summary
-
-
-# ---------------------------------------------------------------------------
-# Whisper ensembling: _ensemble_whisper_transcripts
-# ---------------------------------------------------------------------------
-
-class TestEnsembleWhisperTranscripts:
-    """Test the top-level ensemble function."""
-
-    def _make_whisper_data(self, tmp_path, models=("small", "medium")):
-        """Create whisper transcript files and data."""
-        data = SpeechData()
-        data.audio_path = tmp_path / "audio.mp3"
-        data.audio_path.write_text("fake audio")
-        data.whisper_transcripts = {}
-        for model in models:
-            txt = tmp_path / f"{model}.txt"
-            txt.write_text(f"transcript from {model} model with words")
-            json_path = tmp_path / f"{model}.json"
-            json_path.write_text('{"segments": []}')
-            data.whisper_transcripts[model] = {"txt": txt, "json": json_path}
-        return data
-
-    def test_skips_when_single_model(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        data = self._make_whisper_data(tmp_path, models=("medium",))
-        _ensemble_whisper_transcripts(config, data)
-        # With only one model, should return without ensembling
-        assert not (tmp_path / "ensembled.txt").exists()
-
-    def test_reuses_fresh_ensembled(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        data = self._make_whisper_data(tmp_path)
-        # Create ensembled.txt newer than whisper files
-        time.sleep(0.05)
-        ensembled = tmp_path / "ensembled.txt"
-        ensembled.write_text("cached ensembled text")
-        _ensemble_whisper_transcripts(config, data)
+    @patch("urllib.request.urlopen", side_effect=Exception("Connection refused"))
+    def test_url_unreachable(self, mock_urlopen, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript="https://example.com/bad")
+        text, label = _load_external_transcript(config)
+        assert text is None
         out = capsys.readouterr().out
-        assert "Reusing: ensembled.txt" in out
-        assert data.transcript_path == ensembled
+        assert "Warning" in out
 
-    def test_no_llm_uses_base(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, no_llm=True,
-                              skip_existing=False)
-        data = self._make_whisper_data(tmp_path)
-        # Write distinct content to trigger differences
-        (tmp_path / "small.txt").write_text("hello world from small")
-        (tmp_path / "medium.txt").write_text("hello world from medium")
-        _ensemble_whisper_transcripts(config, data)
-        out = capsys.readouterr().out
-        # Should use medium (larger) as base without LLM resolution
-        ensembled = (tmp_path / "ensembled.txt").read_text()
-        assert "medium" in ensembled
-        assert "--no-llm" in out
+    @patch("urllib.request.urlopen")
+    def test_url_source_label_from_path(self, mock_urlopen, tmp_path):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"text"
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
 
-    @patch("transcriber._resolve_whisper_differences")
-    @patch("transcriber._analyze_differences_wdiff")
-    def test_calls_resolve_when_diffs_found(self, mock_analyze, mock_resolve, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
-        data = self._make_whisper_data(tmp_path)
-        mock_analyze.return_value = [{"type": "changed", "a_text": "x", "b_text": "y"}]
-        mock_resolve.return_value = "resolved text"
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript="https://example.com/path/my_file.txt")
+        _, label = _load_external_transcript(config)
+        assert label == "my_file.txt"
 
-        _ensemble_whisper_transcripts(config, data)
-        mock_resolve.assert_called_once()
-        assert (tmp_path / "ensembled.txt").read_text() == "resolved text"
-
-    @patch("transcriber._analyze_differences_wdiff")
-    def test_no_diffs_uses_base(self, mock_analyze, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
-        data = self._make_whisper_data(tmp_path)
-        mock_analyze.return_value = []
-
-        _ensemble_whisper_transcripts(config, data)
-        out = capsys.readouterr().out
-        assert "No significant differences" in out
-
-    def test_selects_largest_model_as_base(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, no_llm=True,
-                              skip_existing=False)
-        data = self._make_whisper_data(tmp_path, models=("tiny", "small", "large"))
-        (tmp_path / "tiny.txt").write_text("tiny text differs here")
-        (tmp_path / "small.txt").write_text("small text differs here")
-        (tmp_path / "large.txt").write_text("large text differs here")
-        _ensemble_whisper_transcripts(config, data)
-        out = capsys.readouterr().out
-        assert "Using large as base" in out
-
-    def test_dry_run_skips(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True,
-                              skip_existing=False)
-        data = self._make_whisper_data(tmp_path)
-        _ensemble_whisper_transcripts(config, data)
-        out = capsys.readouterr().out
-        assert "[dry-run]" in out
-        assert not (tmp_path / "ensembled.txt").exists()
-
-
-# ---------------------------------------------------------------------------
-# _get_best_transcript_text
-# ---------------------------------------------------------------------------
-
-class TestGetBestTranscriptText:
-    def test_prefers_merged(self, tmp_path):
-        merged = tmp_path / "merged.txt"
-        merged.write_text("merged content")
-        whisper = tmp_path / "whisper.txt"
-        whisper.write_text("whisper content")
-        data = SpeechData(merged_transcript_path=merged, transcript_path=whisper)
-        assert _get_best_transcript_text(data) == "merged content"
-
-    def test_falls_back_to_whisper(self, tmp_path):
-        whisper = tmp_path / "whisper.txt"
-        whisper.write_text("whisper content")
-        data = SpeechData(transcript_path=whisper)
-        assert _get_best_transcript_text(data) == "whisper content"
-
-    def test_returns_empty_when_nothing(self):
-        data = SpeechData()
-        assert _get_best_transcript_text(data) == ""
-
-    def test_ignores_missing_merged(self, tmp_path):
-        whisper = tmp_path / "whisper.txt"
-        whisper.write_text("whisper content")
-        data = SpeechData(
-            merged_transcript_path=tmp_path / "nonexistent.txt",
-            transcript_path=whisper,
-        )
-        assert _get_best_transcript_text(data) == "whisper content"
-
-
-# ---------------------------------------------------------------------------
-# _generate_sequential_markdown
-# ---------------------------------------------------------------------------
-
-class TestGenerateSequentialMarkdown:
-    def test_basic_no_slides(self, tmp_path):
-        transcript = tmp_path / "merged.txt"
-        transcript.write_text("This is the transcript.")
-        data = SpeechData(title="Test Video", merged_transcript_path=transcript)
-        result = _generate_sequential_markdown(data)
-        assert "# Test Video" in result
-        assert "## Transcript" in result
-        assert "This is the transcript." in result
-        assert "merged transcript" in result  # source note
-
-    def test_with_slides_gallery(self, tmp_path):
-        transcript = tmp_path / "merged.txt"
-        transcript.write_text("Transcript text.")
-        slide1 = tmp_path / "slide_0001.png"
-        slide2 = tmp_path / "slide_0002.png"
-        slide1.write_text("img")
-        slide2.write_text("img")
-        data = SpeechData(
-            title="Slides Talk",
-            merged_transcript_path=transcript,
-            slide_images=[slide1, slide2],
-        )
-        result = _generate_sequential_markdown(data)
-        assert "## Slides" in result
-        assert "### Slide 1" in result
-        assert "### Slide 2" in result
-        assert "slide_0001.png" in result
-        assert "Title Slide" in result  # first slide is title slide
-
-    def test_slide_metadata(self, tmp_path):
-        transcript = tmp_path / "merged.txt"
-        transcript.write_text("Text.")
-        slide = tmp_path / "slide_0001.png"
-        slide.write_text("img")
-        data = SpeechData(
-            title="Talk",
-            merged_transcript_path=transcript,
-            slide_images=[slide],
-            slide_metadata=[{"title": "Introduction Slide"}],
-        )
-        result = _generate_sequential_markdown(data)
-        assert "Introduction Slide" in result
-
-    def test_whisper_source_note(self, tmp_path):
-        transcript = tmp_path / "whisper.txt"
-        transcript.write_text("Whisper text.")
-        data = SpeechData(title="Talk", transcript_path=transcript)
-        result = _generate_sequential_markdown(data)
-        assert "Whisper transcript" in result
-
-
-# ---------------------------------------------------------------------------
-# _generate_interleaved_markdown
-# ---------------------------------------------------------------------------
-
-class TestGenerateInterleavedMarkdown:
-    def test_text_only(self):
-        data = SpeechData(
-            title="Test",
-            transcript_segments=[
-                {"start": 0.0, "end": 2.0, "text": "Hello world."},
-                {"start": 2.0, "end": 4.0, "text": "Second segment."},
-            ],
-        )
-        result = _generate_interleaved_markdown(data)
-        assert "# Test" in result
-        assert "Hello world." in result
-        assert "Second segment." in result
-
-    def test_slides_interleaved(self):
-        slide_img = Path("/tmp/slide_0001.png")
-        data = SpeechData(
-            title="Slides Talk",
-            transcript_segments=[
-                {"start": 0.0, "end": 5.0, "text": "Before the slide."},
-                {"start": 10.0, "end": 15.0, "text": "After the slide."},
-            ],
-            slide_timestamps=[{"slide_number": 1, "timestamp": 6.0}],
-            slide_images=[slide_img],
-        )
-        result = _generate_interleaved_markdown(data)
-        lines = result.split("\n")
-        # Find positions
-        before_idx = next(i for i, l in enumerate(lines) if "Before the slide" in l)
-        slide_idx = next(i for i, l in enumerate(lines) if "slide_0001.png" in l)
-        after_idx = next(i for i, l in enumerate(lines) if "After the slide" in l)
-        assert before_idx < slide_idx < after_idx
-
-    def test_slide_metadata_alt_text(self):
-        slide_img = Path("/tmp/slide_0001.png")
-        data = SpeechData(
-            title="Talk",
-            transcript_segments=[{"start": 0.0, "end": 1.0, "text": "Hi."}],
-            slide_timestamps=[{"slide_number": 1, "timestamp": 0.5}],
-            slide_images=[slide_img],
-            slide_metadata=[{"title": "My Custom Title"}],
-        )
-        result = _generate_interleaved_markdown(data)
-        assert "My Custom Title" in result
-
-    def test_merged_note_when_merged_exists(self, tmp_path):
-        merged = tmp_path / "merged.txt"
-        merged.write_text("merged")
-        data = SpeechData(
-            title="Talk",
-            transcript_segments=[{"start": 0.0, "end": 1.0, "text": "Hi."}],
-            merged_transcript_path=merged,
-        )
-        result = _generate_interleaved_markdown(data)
-        assert "merged version available" in result
-
-
-# ---------------------------------------------------------------------------
-# generate_markdown — integration (layout selection)
-# ---------------------------------------------------------------------------
-
-class TestGenerateMarkdownLayout:
-    def test_selects_sequential_without_timestamps(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
-        transcript = tmp_path / "merged.txt"
-        transcript.write_text("Plain transcript.")
-        data = SpeechData(title="Test", merged_transcript_path=transcript)
-        generate_markdown(config, data)
-        out = capsys.readouterr().out
-        assert "sequential layout" in out
-        content = (tmp_path / "transcript.md").read_text()
-        assert "## Transcript" in content
-
-    def test_selects_interleaved_with_timestamps(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
-        slide_img = tmp_path / "slides" / "slide_0001.png"
-        slide_img.parent.mkdir()
-        slide_img.write_text("img")
-        data = SpeechData(
-            title="Test",
-            transcript_segments=[
-                {"start": 0.0, "end": 2.0, "text": "Hello."},
-            ],
-            slide_timestamps=[{"slide_number": 1, "timestamp": 1.0}],
-            slide_images=[slide_img],
-        )
-        generate_markdown(config, data)
-        out = capsys.readouterr().out
-        assert "timestamp-based" in out
-
-
-# ---------------------------------------------------------------------------
-# Pipeline: extract_slides — early returns and skip logic
-# ---------------------------------------------------------------------------
-
-class TestExtractSlides:
-    def test_returns_early_without_video(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        data = SpeechData()
-        # No video_path set
-        extract_slides(config, data)
-        assert data.slides_dir is None
-
-    def test_returns_early_with_missing_video(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        data = SpeechData(video_path=tmp_path / "nonexistent.mp4")
-        extract_slides(config, data)
-        assert data.slides_dir is None
-
-    def test_reuses_fresh_slides(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        # Create video file
-        video = tmp_path / "video.mp4"
-        video.write_text("fake video")
-        data = SpeechData(video_path=video)
-        # Create slides directory with existing slides and timestamps
-        slides_dir = tmp_path / "slides"
-        slides_dir.mkdir()
-        slide_img = slides_dir / "slide_0001.png"
-        slide_img.write_text("img")
-        time.sleep(0.05)
-        ts_file = tmp_path / "slide_timestamps.json"
-        ts_file.write_text(json.dumps([
-            {"slide_number": 1, "filename": "slide_0001.png", "timestamp": 0.0}
-        ]))
-        extract_slides(config, data)
-        out = capsys.readouterr().out
-        assert "Reusing" in out
-        assert len(data.slide_images) == 1
-
-    def test_dry_run_skips(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True)
-        video = tmp_path / "video.mp4"
-        video.write_text("fake video")
-        data = SpeechData(video_path=video)
-        extract_slides(config, data)
-        out = capsys.readouterr().out
-        assert "[dry-run]" in out
-
-
-# ---------------------------------------------------------------------------
-# Pipeline: analyze_slides_with_vision — early returns
-# ---------------------------------------------------------------------------
-
-class TestAnalyzeSlidesWithVision:
-    def test_skips_when_disabled(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=False)
-        data = SpeechData()
-        analyze_slides_with_vision(config, data)
-        assert data.slides_json_path is None
-
-    def test_skips_when_no_llm(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True,
-                              no_llm=True)
-        data = SpeechData(slide_images=[tmp_path / "slide.png"])
-        analyze_slides_with_vision(config, data)
-        out = capsys.readouterr().out
-        assert "--no-llm" in out or data.slides_json_path is None
-
-    def test_skips_when_no_slides(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True)
-        data = SpeechData()
-        analyze_slides_with_vision(config, data)
-        assert data.slides_json_path is None
-
-    def test_reuses_fresh_analysis(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True)
-        slide = tmp_path / "slide_0001.png"
-        slide.write_text("img")
-        data = SpeechData(slide_images=[slide])
-        time.sleep(0.05)
-        slides_json = tmp_path / "slides_transcript.json"
-        slides_json.write_text(json.dumps({"slides": [{"title": "Cached"}]}))
-        analyze_slides_with_vision(config, data)
-        out = capsys.readouterr().out
-        assert "Reusing" in out
-        assert data.slide_metadata == [{"title": "Cached"}]
-
-    def test_dry_run_skips(self, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True,
-                              dry_run=True, skip_existing=False)
-        slide = tmp_path / "slide_0001.png"
-        slide.write_text("img")
-        data = SpeechData(slide_images=[slide])
-        analyze_slides_with_vision(config, data)
-        out = capsys.readouterr().out
-        assert "[dry-run]" in out
-
-
-# ---------------------------------------------------------------------------
-# Pipeline: transcribe_audio — validation
-# ---------------------------------------------------------------------------
-
-class TestTranscribeAudio:
-    def test_raises_without_audio(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        data = SpeechData()
-        with pytest.raises(FileNotFoundError):
-            transcribe_audio(config, data)
-
-    def test_raises_with_missing_audio_file(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path)
-        data = SpeechData(audio_path=tmp_path / "nonexistent.mp3")
-        with pytest.raises(FileNotFoundError):
-            transcribe_audio(config, data)
+    def test_local_source_label_is_filename(self, tmp_path):
+        f = tmp_path / "my_notes.txt"
+        f.write_text("notes")
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript=str(f))
+        _, label = _load_external_transcript(config)
+        assert label == "my_notes.txt"

@@ -1,15 +1,24 @@
 """
 Shared types and utilities for the speech transcription pipeline.
 
-Contains SpeechConfig, SpeechData, and utility functions used by both
-transcriber.py and merge.py.
+Contains SpeechConfig, SpeechData, and utility functions used by
+transcriber.py, merge.py, and all pipeline stage modules.
 """
 
+import json
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+
+import functools
+print = functools.partial(print, flush=True)
+
+# Whisper model sizes in descending quality order (used for base-model selection)
+MODEL_SIZES = ["large", "medium", "small", "base", "tiny"]
 
 
 @dataclass
@@ -203,3 +212,86 @@ def llm_call_with_retry(client, config: SpeechConfig, **kwargs) -> object:
 
 # Keep old name as alias for backward compatibility in tests
 api_call_with_retry = llm_call_with_retry
+
+
+# ---------------------------------------------------------------------------
+# Pipeline utilities (used across download, transcription, slides, output)
+# ---------------------------------------------------------------------------
+
+def run_command(cmd: list[str], description: str, verbose: bool = False) -> subprocess.CompletedProcess:
+    """Run a shell command with error handling."""
+    if verbose:
+        print(f"  Running: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result
+    except subprocess.CalledProcessError as e:
+        print(f"  Error during {description}:")
+        print(f"  {e.stderr}")
+        raise
+
+
+def _save_json(path: Path, data) -> None:
+    """Write data to a JSON file with standard formatting."""
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def _print_reusing(label: str) -> None:
+    """Print a 'Reusing' message for a cached artifact."""
+    print(f"  Reusing: {label}")
+
+
+def _dry_run_skip(config: SpeechConfig, action: str, output: str) -> bool:
+    """In dry-run mode, print what would happen and return True to skip execution."""
+    if not config.dry_run:
+        return False
+    print(f"  [dry-run] Would {action} → {output}")
+    return True
+
+
+def _collect_source_paths(config: SpeechConfig, data: SpeechData,
+                          extra: list = None) -> list:
+    """Collect source file paths for DAG staleness checks.
+
+    Includes transcript, captions, and external transcript (if it's a local file).
+    """
+    paths = list(extra or [])
+    if data.transcript_path and data.transcript_path.exists():
+        paths.append(data.transcript_path)
+    if data.captions_path and data.captions_path.exists():
+        paths.append(data.captions_path)
+    if config.external_transcript and not config.external_transcript.startswith(("http://", "https://")):
+        ext_path = Path(config.external_transcript)
+        if ext_path.exists():
+            paths.append(ext_path)
+    return paths
+
+
+def check_dependencies() -> dict[str, bool]:
+    """Check for required external tools."""
+    deps = {
+        "yt-dlp": False,
+        "ffmpeg": False,
+        "mlx_whisper": False,
+        "whisper": False,
+    }
+
+    # Check command-line tools
+    for tool in ["yt-dlp", "ffmpeg"]:
+        deps[tool] = shutil.which(tool) is not None
+
+    # Check Python packages
+    try:
+        import mlx_whisper
+        deps["mlx_whisper"] = True
+    except ImportError:
+        pass
+
+    try:
+        import whisper
+        deps["whisper"] = True
+    except ImportError:
+        pass
+
+    return deps

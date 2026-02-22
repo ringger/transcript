@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,13 +13,19 @@ from conftest import make_openai_response
 
 from shared import (
     SpeechConfig,
+    SpeechData,
     _NormalizedResponse,
+    _collect_source_paths,
     _convert_messages_to_openai,
+    _dry_run_skip,
     _has_vision_content,
+    _save_json,
     api_call_with_retry,
+    check_dependencies,
     create_llm_client,
     is_up_to_date,
     llm_call_with_retry,
+    run_command,
 )
 
 
@@ -587,3 +594,215 @@ class TestLlmCallWithRetryLocal:
         img_part = sent_msgs[0]["content"][1]
         assert img_part["type"] == "image_url"
         assert "data:image/png;base64,abc" in img_part["image_url"]["url"]
+
+
+# ---------------------------------------------------------------------------
+# _dry_run_skip
+# ---------------------------------------------------------------------------
+
+class TestDryRunSkip:
+    def test_returns_false_when_not_dry_run(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=False)
+        assert _dry_run_skip(config, "do thing", "out.txt") is False
+
+    def test_returns_true_when_dry_run(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True)
+        assert _dry_run_skip(config, "do thing", "out.txt") is True
+
+    def test_prints_message_when_dry_run(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True)
+        _dry_run_skip(config, "merge sources", "merged.txt")
+        captured = capsys.readouterr()
+        assert "[dry-run]" in captured.out
+        assert "merge sources" in captured.out
+        assert "merged.txt" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# run_command
+# ---------------------------------------------------------------------------
+
+class TestRunCommand:
+    @patch("shared.subprocess.run")
+    def test_success_returns_completed_process(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["echo", "hi"], returncode=0, stdout="hi\n", stderr=""
+        )
+        result = run_command(["echo", "hi"], "echo test")
+        assert result.stdout == "hi\n"
+        mock_run.assert_called_once_with(
+            ["echo", "hi"], capture_output=True, text=True, check=True
+        )
+
+    @patch("shared.subprocess.run")
+    def test_verbose_prints_command(self, mock_run, capsys):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["ls"], returncode=0, stdout="", stderr=""
+        )
+        run_command(["ls", "-la"], "listing", verbose=True)
+        out = capsys.readouterr().out
+        assert "ls -la" in out
+
+    @patch("shared.subprocess.run")
+    def test_not_verbose_no_print(self, mock_run, capsys):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["ls"], returncode=0, stdout="", stderr=""
+        )
+        run_command(["ls"], "listing", verbose=False)
+        out = capsys.readouterr().out
+        assert "ls" not in out
+
+    @patch("shared.subprocess.run")
+    def test_failure_prints_stderr_and_reraises(self, mock_run, capsys):
+        mock_run.side_effect = subprocess.CalledProcessError(
+            returncode=1, cmd=["bad"], stderr="something broke"
+        )
+        with pytest.raises(subprocess.CalledProcessError):
+            run_command(["bad"], "bad command")
+        out = capsys.readouterr().out
+        assert "Error during bad command" in out
+        assert "something broke" in out
+
+
+# ---------------------------------------------------------------------------
+# check_dependencies
+# ---------------------------------------------------------------------------
+
+class TestCheckDependencies:
+    @patch("shared.shutil.which", return_value="/usr/bin/tool")
+    def test_cli_tools_found(self, mock_which):
+        deps = check_dependencies()
+        assert deps["yt-dlp"] is True
+        assert deps["ffmpeg"] is True
+
+    @patch("shared.shutil.which", return_value=None)
+    def test_cli_tools_missing(self, mock_which):
+        deps = check_dependencies()
+        assert deps["yt-dlp"] is False
+        assert deps["ffmpeg"] is False
+
+    @patch("shared.shutil.which", return_value=None)
+    def test_no_whisper_packages(self, mock_which):
+        # Force both Whisper imports to fail
+        import sys
+        saved_mlx = sys.modules.get("mlx_whisper")
+        saved_whisper = sys.modules.get("whisper")
+        sys.modules["mlx_whisper"] = None  # causes ImportError on import
+        sys.modules["whisper"] = None
+        try:
+            deps = check_dependencies()
+            assert deps["mlx_whisper"] is False
+            assert deps["whisper"] is False
+        finally:
+            if saved_mlx is not None:
+                sys.modules["mlx_whisper"] = saved_mlx
+            else:
+                sys.modules.pop("mlx_whisper", None)
+            if saved_whisper is not None:
+                sys.modules["whisper"] = saved_whisper
+            else:
+                sys.modules.pop("whisper", None)
+
+
+# ---------------------------------------------------------------------------
+# _collect_source_paths
+# ---------------------------------------------------------------------------
+
+class TestCollectSourcePaths:
+    def test_empty_no_paths(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        paths = _collect_source_paths(config, data)
+        assert paths == []
+
+    def test_extra_forwarded(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        extra = tmp_path / "extra.txt"
+        extra.write_text("x")
+        paths = _collect_source_paths(config, data, extra=[extra])
+        assert extra in paths
+
+    def test_transcript_included_when_exists(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        transcript = tmp_path / "t.txt"
+        transcript.write_text("text")
+        data = SpeechData(transcript_path=transcript)
+        paths = _collect_source_paths(config, data)
+        assert transcript in paths
+
+    def test_transcript_excluded_when_missing(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData(transcript_path=tmp_path / "missing.txt")
+        paths = _collect_source_paths(config, data)
+        assert len(paths) == 0
+
+    def test_captions_included_when_exists(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        captions = tmp_path / "caps.vtt"
+        captions.write_text("WEBVTT")
+        data = SpeechData(captions_path=captions)
+        paths = _collect_source_paths(config, data)
+        assert captions in paths
+
+    def test_external_url_excluded(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript="https://example.com/t.txt")
+        data = SpeechData()
+        paths = _collect_source_paths(config, data)
+        assert len(paths) == 0
+
+    def test_external_local_file_included(self, tmp_path):
+        ext_file = tmp_path / "ext.txt"
+        ext_file.write_text("external text")
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript=str(ext_file))
+        data = SpeechData()
+        paths = _collect_source_paths(config, data)
+        assert ext_file in paths
+
+    def test_external_local_file_missing_excluded(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              external_transcript=str(tmp_path / "nope.txt"))
+        data = SpeechData()
+        paths = _collect_source_paths(config, data)
+        assert len(paths) == 0
+
+
+# ---------------------------------------------------------------------------
+# _save_json
+# ---------------------------------------------------------------------------
+
+class TestSaveJson:
+    def test_writes_dict(self, tmp_path):
+        path = tmp_path / "out.json"
+        _save_json(path, {"key": "value"})
+        content = path.read_text()
+        assert '"key": "value"' in content
+
+    def test_writes_with_indent(self, tmp_path):
+        path = tmp_path / "out.json"
+        _save_json(path, {"a": 1})
+        content = path.read_text()
+        # indent=2 means the key is on its own line with 2-space indent
+        assert "  " in content
+
+    def test_writes_nested_structure(self, tmp_path):
+        path = tmp_path / "out.json"
+        _save_json(path, {"outer": {"inner": [1, 2, 3]}})
+        loaded = json.loads(path.read_text())
+        assert loaded["outer"]["inner"] == [1, 2, 3]
+
+    def test_writes_list_data(self, tmp_path):
+        path = tmp_path / "out.json"
+        _save_json(path, [{"a": 1}, {"b": 2}])
+        loaded = json.loads(path.read_text())
+        assert len(loaded) == 2
+
+    def test_overwrites_existing(self, tmp_path):
+        path = tmp_path / "out.json"
+        _save_json(path, {"old": True})
+        _save_json(path, {"new": True})
+        loaded = json.loads(path.read_text())
+        assert "new" in loaded
+        assert "old" not in loaded
