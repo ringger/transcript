@@ -11,6 +11,9 @@ from shared import (
     SpeechConfig,
     SpeechData,
     api_call_with_retry,
+    llm_call_with_retry,
+    create_llm_client,
+    _NormalizedResponse,
     is_up_to_date,
 )
 
@@ -415,7 +418,7 @@ class TestDryRunSkip:
 class TestApiCallWithRetry:
     @pytest.fixture
     def cfg(self, tmp_path):
-        return SpeechConfig(url="x", output_dir=tmp_path)
+        return SpeechConfig(url="x", output_dir=tmp_path, local=False)
 
     def test_success_on_first_try(self, cfg):
         client = MagicMock()
@@ -552,7 +555,8 @@ def _make_test_artefacts(tmp_path):
         output_dir=tmp_path,
         skip_existing=True,
         merge_sources=True,
-        no_api=False,
+        no_llm=False,
+        local=False,
         api_key="fake-key",
     )
     data = SpeechData(
@@ -873,8 +877,9 @@ class TestBuildWdiffAlignment:
 class TestMergeStructuredEndToEnd:
     """Test _merge_structured with real wdiff subprocess, only mocking the API."""
 
-    @patch("merge.api_call_with_retry")
-    def test_blind_merge_with_real_wdiff(self, mock_api, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_blind_merge_with_real_wdiff(self, mock_api, mock_client, tmp_path):
         """Full pipeline: wdiff alignment + anonymous prompting + response parsing."""
         segments = [
             {"speaker": "Host", "timestamp": "0:00:00",
@@ -921,7 +926,7 @@ class TestMergeStructuredEndToEnd:
 
         mock_api.side_effect = fake_api_response
 
-        result = _merge_structured("fake-key", segments, all_sources, config, source_paths)
+        result = _merge_structured(segments, all_sources, config, source_paths)
 
         assert len(result) == 2
         # Speaker/timestamp restored from skeleton
@@ -933,8 +938,9 @@ class TestMergeStructuredEndToEnd:
         assert result[0]["text"] == "Welcome to the podcast today"
         assert result[1]["text"] == "Thanks for having me here"
 
-    @patch("merge.api_call_with_retry")
-    def test_alignment_extracts_correct_segments_for_prompt(self, mock_api, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_alignment_extracts_correct_segments_for_prompt(self, mock_api, mock_client, tmp_path):
         """Verify wdiff alignment produces sensible per-segment text in the prompt."""
         segments = [
             {"speaker": "A", "timestamp": "0:00:00",
@@ -972,7 +978,7 @@ class TestMergeStructuredEndToEnd:
 
         mock_api.side_effect = fake_api_response
 
-        _merge_structured("fake-key", segments, all_sources, config, source_paths)
+        _merge_structured(segments, all_sources, config, source_paths)
 
         assert len(captured_prompts) == 1
         prompt = captured_prompts[0]
@@ -1078,8 +1084,9 @@ class TestComputeChunkDiffs:
 class TestMergeMultiSourceEndToEnd:
     """Test _merge_multi_source with real wdiff, only mocking the API."""
 
-    @patch("merge.api_call_with_retry")
-    def test_anonymous_prompt_no_source_names(self, mock_api, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_anonymous_prompt_no_source_names(self, mock_api, mock_client, tmp_path):
         """Source names should not appear in the prompt sent to Claude."""
         sources = [
             ("Whisper AI Transcript", "whisper", "hello world foo bar " * 50),
@@ -1104,11 +1111,12 @@ class TestMergeMultiSourceEndToEnd:
 
         mock_api.side_effect = fake_api_response
 
-        result = _merge_multi_source("fake-key", sources, config, source_paths)
+        result = _merge_multi_source(sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("merge.api_call_with_retry")
-    def test_three_sources(self, mock_api, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_three_sources(self, mock_api, mock_client, tmp_path):
         """Flat merge with 3 sources should work with wdiff alignment."""
         text = "the quick brown fox jumps over the lazy dog " * 60
         sources = [
@@ -1133,11 +1141,12 @@ class TestMergeMultiSourceEndToEnd:
 
         mock_api.side_effect = fake_api_response
 
-        result = _merge_multi_source("fake-key", sources, config, source_paths)
+        result = _merge_multi_source(sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("merge.api_call_with_retry")
-    def test_checkpoint_versioning(self, mock_api, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_checkpoint_versioning(self, mock_api, mock_client, tmp_path):
         """Flat merge should use checkpoint versioning."""
         text = "word " * 600
         sources = [
@@ -1156,7 +1165,7 @@ class TestMergeMultiSourceEndToEnd:
 
         mock_api.side_effect = fake_api_response
 
-        _merge_multi_source("fake-key", sources, config, source_paths)
+        _merge_multi_source(sources, config, source_paths)
 
         chunks_dir = tmp_path / "merge_chunks"
         assert (chunks_dir / ".version").read_text().strip() == MERGE_CHECKPOINT_VERSION
@@ -1206,8 +1215,9 @@ class TestCheckpointFileIntegrity:
         return responder
 
     @patch("merge._build_wdiff_alignment")
-    @patch("merge.api_call_with_retry")
-    def test_each_chunk_gets_own_checkpoint(self, mock_api, mock_align, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_each_chunk_gets_own_checkpoint(self, mock_api, mock_client, mock_align, tmp_path):
         """Verify the checkpoint_path bug fix: each chunk writes a distinct file."""
         segments, all_sources = self._make_segments_and_sources(6)
 
@@ -1224,7 +1234,7 @@ class TestCheckpointFileIntegrity:
         # 2 segments per chunk → 3 chunks → each API call gets 2 passages
         mock_api.side_effect = self._fake_passage_response(2)
 
-        result = _merge_structured("fake-key", segments, all_sources, config, source_paths)
+        result = _merge_structured(segments, all_sources, config, source_paths)
 
         # Should have 3 chunks (6 segments / 2 per chunk)
         chunks_dir = tmp_path / "merge_chunks"
@@ -1251,8 +1261,9 @@ class TestCheckpointFileIntegrity:
         assert version_file.read_text().strip() == MERGE_CHECKPOINT_VERSION
 
     @patch("merge._build_wdiff_alignment")
-    @patch("merge.api_call_with_retry")
-    def test_partial_resume_skips_fresh_chunks(self, mock_api, mock_align, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_partial_resume_skips_fresh_chunks(self, mock_api, mock_client, mock_align, tmp_path):
         """Pre-existing fresh checkpoints should be loaded, not re-processed."""
         segments, all_sources = self._make_segments_and_sources(4)
 
@@ -1279,7 +1290,7 @@ class TestCheckpointFileIntegrity:
 
         mock_api.side_effect = self._fake_passage_response(2)
 
-        result = _merge_structured("fake-key", segments, all_sources, config, source_paths)
+        result = _merge_structured(segments, all_sources, config, source_paths)
 
         # Only 1 API call — chunk 0 was reused
         assert mock_api.call_count == 1
@@ -1290,8 +1301,9 @@ class TestCheckpointFileIntegrity:
         assert result[1]["text"] == "Cached segment two."
 
     @patch("merge._build_wdiff_alignment")
-    @patch("merge.api_call_with_retry")
-    def test_stale_checkpoint_is_reprocessed(self, mock_api, mock_align, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_stale_checkpoint_is_reprocessed(self, mock_api, mock_client, mock_align, tmp_path):
         """A checkpoint older than a source should be re-processed via API."""
         segments, all_sources = self._make_segments_and_sources(2)
 
@@ -1317,15 +1329,16 @@ class TestCheckpointFileIntegrity:
 
         mock_api.side_effect = self._fake_passage_response(2)
 
-        result = _merge_structured("fake-key", segments, all_sources, config, source_paths)
+        result = _merge_structured(segments, all_sources, config, source_paths)
 
         # API should be called — stale checkpoint not reused
         assert mock_api.call_count == 1
         assert result[0]["text"] == "Merged text for passage 1."
 
     @patch("merge._build_wdiff_alignment")
-    @patch("merge.api_call_with_retry")
-    def test_version_mismatch_clears_old_checkpoints(self, mock_api, mock_align, tmp_path):
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_version_mismatch_clears_old_checkpoints(self, mock_api, mock_client, mock_align, tmp_path):
         """Checkpoint version mismatch should clear old chunk files."""
         segments, all_sources = self._make_segments_and_sources(2)
 
@@ -1347,7 +1360,7 @@ class TestCheckpointFileIntegrity:
 
         mock_api.side_effect = self._fake_passage_response(2)
 
-        result = _merge_structured("fake-key", segments, all_sources, config, source_paths)
+        result = _merge_structured(segments, all_sources, config, source_paths)
 
         # Old chunk should have been cleared and re-processed
         assert mock_api.call_count == 1
@@ -1445,8 +1458,8 @@ class TestExtractTextFromHtml:
 # ---------------------------------------------------------------------------
 
 class TestEstimateApiCost:
-    def test_no_api_returns_zero(self, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, no_api=True)
+    def test_no_llm_returns_zero(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, no_llm=True)
         costs = estimate_api_cost(config)
         assert costs["total"] == 0.0
         assert costs["details"] == []
@@ -1510,7 +1523,7 @@ class TestApiCallWithRetryTimeout:
     @pytest.fixture
     def cfg(self, tmp_path):
         return SpeechConfig(url="x", output_dir=tmp_path,
-                            api_initial_backoff=1, api_max_retries=3)
+                            local=False, api_initial_backoff=1, api_max_retries=3)
 
     @patch("shared.time.sleep")
     def test_retries_on_timeout(self, mock_sleep, cfg):

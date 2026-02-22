@@ -31,8 +31,11 @@ Examples:
     # Ensemble multiple Whisper models for better accuracy
     python transcriber.py "https://youtube.com/watch?v=..." --whisper-models small,medium
 
-    # Run without any API calls (free, local only)
-    python transcriber.py "https://youtube.com/watch?v=..." --no-api
+    # Run without any LLM (Whisper only, free)
+    python transcriber.py "https://youtube.com/watch?v=..." --no-llm
+
+    # Use Anthropic Claude API instead of local Ollama
+    python transcriber.py "https://youtube.com/watch?v=..." --api
 
     # Custom output directory and model
     python transcriber.py "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
@@ -54,7 +57,7 @@ import functools
 print = functools.partial(print, flush=True)
 
 # Shared types and utilities
-from shared import SpeechConfig, SpeechData, is_up_to_date, api_call_with_retry
+from shared import SpeechConfig, SpeechData, is_up_to_date, create_llm_client, llm_call_with_retry
 
 # Merge logic
 from merge import (
@@ -136,13 +139,13 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
     # Estimate tokens (rough: 1 word ≈ 1.3 tokens)
     transcript_tokens = int(transcript_words * 1.3)
 
-    if config.analyze_slides and not config.no_api:
+    if config.analyze_slides and not config.no_llm:
         # Vision API: ~$0.02 per image for medium-sized slides
         slide_cost = num_slides * 0.02
         costs["analyze_slides"] = slide_cost
         costs["details"].append(f"Slide analysis: {num_slides} slides × $0.02 = ${slide_cost:.2f}")
 
-    if config.merge_sources and not config.no_api:
+    if config.merge_sources and not config.no_llm:
         # Count merge sources: Whisper + YouTube captions + optional external
         num_sources = 2  # Whisper + YouTube
         if config.external_transcript:
@@ -163,7 +166,7 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
         costs["details"].append(
             f"Source merging: {num_sources} sources × {num_chunks} chunks = ${merge_cost:.2f}")
 
-    if len(config.whisper_models) > 1 and not config.no_api:
+    if len(config.whisper_models) > 1 and not config.no_llm:
         # Ensemble: chunked processing, each chunk sends base + other models + diffs
         num_models = len(config.whisper_models)
         num_chunks = max(1, transcript_words // config.merge_chunk_words + 1)
@@ -504,17 +507,13 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
 
     # If we have differences and API key, use Claude to resolve
     if all_differences:
-        api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if config.no_api:
-            print("  --no-api flag set - using base model without resolving differences")
+        if config.no_llm:
+            print("  --no-llm flag set - using base model without resolving differences")
             ensembled_text = base_text
-        elif api_key:
-            ensembled_text = _resolve_whisper_differences(
-                api_key, base_text, transcripts, all_differences, config
-            )
         else:
-            print("  No API key - using base model without resolving differences")
-            ensembled_text = base_text
+            ensembled_text = _resolve_whisper_differences(
+                base_text, transcripts, all_differences, config
+            )
     else:
         print("  No significant differences found between models")
         ensembled_text = base_text
@@ -532,9 +531,9 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
         data.transcript_json_path = data.whisper_transcripts[base_model].get("json")
 
 
-def _resolve_whisper_differences(api_key: str, base_text: str, all_transcripts: dict,
+def _resolve_whisper_differences(base_text: str, all_transcripts: dict,
                                   differences: list, config: SpeechConfig) -> str:
-    """Use Claude to resolve differences between Whisper model outputs."""
+    """Use LLM to resolve differences between Whisper model outputs."""
 
     # Format differences for Claude
     meaningful_diffs = _filter_meaningful_diffs(differences)
@@ -553,7 +552,7 @@ def _resolve_whisper_differences(api_key: str, base_text: str, all_transcripts: 
     base_words = base_text.split()
 
     if len(base_words) <= config.merge_chunk_words:
-        return _resolve_whisper_chunk(api_key, base_text, all_transcripts,
+        return _resolve_whisper_chunk(base_text, all_transcripts,
                                       diff_summary, config)
 
     # Process in chunks
@@ -576,25 +575,23 @@ def _resolve_whisper_differences(api_key: str, base_text: str, all_transcripts: 
                 other_chunks[model] = " ".join(words[ot_start:ot_end])
 
         print(f"  Ensembling chunk {i+1}/{num_chunks}...")
-        chunk_result = _resolve_whisper_chunk(api_key, base_chunk, other_chunks,
+        chunk_result = _resolve_whisper_chunk(base_chunk, other_chunks,
                                               diff_summary, config)
         merged_chunks.append(chunk_result)
 
     return "\n\n".join(merged_chunks)
 
 
-def _resolve_whisper_chunk(api_key: str, base_text: str, all_transcripts: dict,
+def _resolve_whisper_chunk(base_text: str, all_transcripts: dict,
                             diff_summary: str, config: SpeechConfig) -> str:
-    """Use Claude to resolve differences in a chunk of Whisper model outputs."""
-    import anthropic
-
+    """Use LLM to resolve differences in a chunk of Whisper model outputs."""
     # Format other transcripts for reference
     other_transcripts_text = ""
     for model, text in all_transcripts.items():
         if model != "ensembled":
             other_transcripts_text += f"\n--- {model.upper()} MODEL ---\n{text}\n"
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = create_llm_client(config)
 
     prompt = f"""You are ensembling multiple Whisper transcripts of the same speech to create the most accurate version.
 
@@ -619,7 +616,7 @@ INSTRUCTIONS:
 
 Output the ensembled transcript:"""
 
-    message = api_call_with_retry(
+    message = llm_call_with_retry(
         client, config,
         model=config.claude_model,
         max_tokens=16384,
@@ -747,8 +744,8 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
         print("  Skipped (use --analyze-slides to enable)")
         return
 
-    if config.no_api:
-        print("  Skipped (--no-api flag set)")
+    if config.no_llm:
+        print("  Skipped (--no-llm flag set)")
         return
 
     if not data.slide_images:
@@ -763,22 +760,10 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
         data.slide_metadata = slides_data.get("slides", [])
         data.slides_json_path = slides_json_path
         return
-    if _dry_run_skip(config, "analyze slides with Claude Vision", "slides_transcript.json"):
+    if _dry_run_skip(config, "analyze slides with vision LLM", "slides_transcript.json"):
         return
 
-    # Get API key
-    api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("Anthropic API key required for slide analysis. "
-                        "Set ANTHROPIC_API_KEY environment variable or use --api-key")
-
-    try:
-        import anthropic
-    except ImportError:
-        raise ImportError("anthropic package required for slide analysis. "
-                         "Install with: pip install anthropic")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    client = create_llm_client(config)
 
     slides_metadata = []
 
@@ -789,8 +774,8 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
         with open(slide_path, "rb") as f:
             image_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
-        # Call Claude vision API
-        message = api_call_with_retry(
+        # Call vision LLM
+        message = llm_call_with_retry(
             client, config,
             model=config.claude_model,
             max_tokens=1024,
@@ -894,8 +879,8 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
         print("  Skipped (--no-merge flag set)")
         return
 
-    if config.no_api:
-        print("  Skipped (--no-api flag set)")
+    if config.no_llm:
+        print("  Skipped (--no-llm flag set)")
         return
 
     # Load external transcript if provided
@@ -953,18 +938,6 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     if _dry_run_skip(config, "merge transcript sources", "transcript_merged.txt"):
         return
 
-    # Get API key
-    api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("Anthropic API key required for transcript merging. "
-                        "Set ANTHROPIC_API_KEY environment variable or use --api-key")
-
-    try:
-        import anthropic
-    except ImportError:
-        raise ImportError("anthropic package required for transcript merging. "
-                         "Install with: pip install anthropic")
-
     # Load available transcripts
     youtube_text = None
     whisper_text = None
@@ -1007,12 +980,12 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
         print(f"  Parsed {len(skeleton_segments)} segments from external transcript")
 
         # Pass all sources — text is treated equally, structure comes from skeleton
-        corrected_segments = _merge_structured(api_key, skeleton_segments, sources,
+        corrected_segments = _merge_structured(skeleton_segments, sources,
                                                config, merge_inputs)
         merged_text = _format_structured_segments(corrected_segments)
     else:
         # Flat merge: wdiff alignment and anonymous presentation
-        merged_text = _merge_multi_source(api_key, sources, config, merge_inputs)
+        merged_text = _merge_multi_source(sources, config, merge_inputs)
 
     # Save merged transcript
     with open(merged_path, 'w') as f:
@@ -1443,15 +1416,21 @@ Examples:
     slides_group.add_argument("--analyze-slides", action="store_true",
                         help="Use Claude vision API to analyze slides (requires API key)")
 
-    # API
-    api_group = parser.add_argument_group("API")
-    api_group.add_argument("--api-key",
-                        help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
-    api_group.add_argument("--claude-model", default="claude-sonnet-4-20250514",
+    # LLM backend
+    llm_group = parser.add_argument_group("LLM backend")
+    llm_group.add_argument("--api", action="store_true",
+                        help="Use Anthropic Claude API instead of local Ollama (requires API key)")
+    llm_group.add_argument("--api-key",
+                        help="Anthropic API key (or set ANTHROPIC_API_KEY env var; implies --api)")
+    llm_group.add_argument("--claude-model", default="claude-sonnet-4-20250514",
                         help="Claude model for API calls (default: claude-sonnet-4-20250514)")
-    api_group.add_argument("--no-api", action="store_true",
-                        help="Skip all API-dependent features (slide analysis, merging, ensembling)")
-    api_group.add_argument("--no-merge", action="store_true",
+    llm_group.add_argument("--local-model", default="qwen2.5",
+                        help="Ollama model for text tasks (default: qwen2.5)")
+    llm_group.add_argument("--ollama-url", default="http://localhost:11434/v1/",
+                        help="Ollama server URL (default: http://localhost:11434/v1/)")
+    llm_group.add_argument("--no-llm", action="store_true",
+                        help="Skip all LLM-dependent features (merging, ensembling, slide analysis)")
+    llm_group.add_argument("--no-merge", action="store_true",
                         help="Skip merging YouTube captions with Whisper (merge is on by default)")
 
     # Pipeline control
@@ -1505,6 +1484,9 @@ Examples:
             print(f"Valid options: {', '.join(valid_models)}")
             sys.exit(1)
 
+    # Determine LLM backend: --api or --api-key switches to cloud API
+    use_api = args.api or bool(args.api_key)
+
     # Create config
     config = SpeechConfig(
         url=args.url,
@@ -1515,7 +1497,10 @@ Examples:
         analyze_slides=args.analyze_slides,
         merge_sources=not args.no_merge,
         external_transcript=args.external_transcript,
-        no_api=args.no_api,
+        no_llm=args.no_llm,
+        local=not use_api,
+        local_model=args.local_model,
+        ollama_base_url=args.ollama_url,
         api_key=args.api_key,
         claude_model=args.claude_model,
         skip_existing=not args.force,
@@ -1546,24 +1531,26 @@ Examples:
         print("\nNote: --external-transcript implies merging; enabling merge.")
         config.merge_sources = True
 
-    # Early API key check - fail fast if API features requested without key
-    api_features_requested = config.analyze_slides or config.merge_sources or len(config.whisper_models) > 1
-    if api_features_requested and not config.no_api:
+    # Early validation: if using cloud API, check for API key
+    llm_features_requested = config.analyze_slides or config.merge_sources or len(config.whisper_models) > 1
+    if llm_features_requested and not config.no_llm and not config.local:
         api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            print("\nError: API features requested but no API key found.")
-            print("\nYou requested:")
-            if config.analyze_slides:
-                print("  --analyze-slides (requires API)")
-            if config.merge_sources:
-                print("  --merge-sources [on by default] (requires API)")
-            if len(config.whisper_models) > 1:
-                print(f"  --whisper-models {','.join(config.whisper_models)} (ensembling requires API)")
+            print("\nError: --api mode requested but no API key found.")
             print("\nOptions:")
             print("  1. Set ANTHROPIC_API_KEY environment variable")
             print("  2. Use --api-key YOUR_KEY")
-            print("  3. Add --no-api to skip API-dependent features")
+            print("  3. Remove --api to use local Ollama instead (free)")
+            print("  4. Add --no-llm to skip LLM-dependent features")
             sys.exit(1)
+
+    # Show LLM backend info
+    if config.no_llm:
+        print(f"  LLM: disabled (--no-llm)")
+    elif config.local:
+        print(f"  LLM: local Ollama ({config.local_model})")
+    else:
+        print(f"  LLM: Anthropic API ({config.claude_model})")
 
     print(f"\nProcessing: {args.url}")
     print(f"Output directory: {output_dir}")
@@ -1586,8 +1573,8 @@ Examples:
     except Exception:
         pass  # Fall back to default estimate
 
-    # Print cost estimate if API features are enabled
-    if api_features_requested and not config.no_api:
+    # Print cost estimate if using cloud API
+    if llm_features_requested and not config.no_llm and not config.local:
         print_cost_estimate(config, transcript_words=estimated_words)
 
     if config.dry_run:
@@ -1671,8 +1658,8 @@ Examples:
         if not config.no_slides and not config.analyze_slides and data.slide_images:
             print("\nTip: Run with --analyze-slides to get detailed slide descriptions")
 
-        if (not config.merge_sources or config.no_api) and data.captions_path and data.captions_path.exists() and not data.merged_transcript_path:
-            print("Tip: YouTube captions available - run without --no-merge/--no-api to create a 'critical text'")
+        if (not config.merge_sources or config.no_llm) and data.captions_path and data.captions_path.exists() and not data.merged_transcript_path:
+            print("Tip: YouTube captions available - run without --no-merge/--no-llm to create a 'critical text'")
 
     except Exception as e:
         print(f"\nError: {e}")

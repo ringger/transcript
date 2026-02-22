@@ -5,7 +5,7 @@ Thanks for your interest in contributing!
 ## Getting Started
 
 1. Fork the repo and clone your fork
-2. Install external tools: `brew install ffmpeg wdiff` (macOS) or `apt install ffmpeg wdiff` (Ubuntu/Debian)
+2. Install external tools: `brew install ffmpeg wdiff ollama` (macOS) or `apt install ffmpeg wdiff` + [Ollama](https://ollama.com/) (Ubuntu/Debian)
 3. Install Python dependencies: `pip install -r requirements.txt` (auto-selects the right Whisper for your platform)
 4. Run tests: `pytest -v`
 

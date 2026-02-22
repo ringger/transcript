@@ -15,7 +15,8 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 - **Make-style DAG pipeline**: Each stage checks whether its outputs are newer than its inputs, skipping unnecessary work
 - **Checkpoint resumption**: Long merge operations save per-chunk checkpoints, resuming from where they left off after interruption
 - **Cost estimation**: Shows estimated API costs before running (`--dry-run` for estimation only)
-- **Local-only mode**: `--no-api` for completely free operation (Whisper only)
+- **Local-first LLM**: Uses Ollama by default for free, local operation — no API key needed
+- **Whisper-only mode**: `--no-llm` to skip all LLM features and run Whisper only
 
 ## Installation
 
@@ -28,23 +29,30 @@ brew install ffmpeg wdiff    # macOS
 
 # Install Python dependencies (auto-selects mlx-whisper on Apple Silicon, openai-whisper elsewhere)
 pip install -r requirements.txt
+
+# Install Ollama for local LLM (used by default for merging/ensembling)
+brew install ollama          # macOS
+# curl -fsSL https://ollama.com/install.sh | sh  # Linux
+
+# Pull a model (one-time)
+ollama pull qwen2.5
 ```
 
 ## Quick Start
 
 ```bash
-# Basic: Whisper transcription + YouTube caption merge
+# Basic: Whisper transcription + local LLM merge (free, uses Ollama)
 python transcriber.py "https://youtube.com/watch?v=..."
 
 # With an external human-edited transcript for three-way merge
 python transcriber.py "https://youtube.com/watch?v=..." \
     --external-transcript "https://example.com/transcript"
 
-# Dry run: see what would happen and estimated costs
-python transcriber.py "https://youtube.com/watch?v=..." --dry-run
+# Use Anthropic Claude API instead of local Ollama (higher quality, costs money)
+python transcriber.py "https://youtube.com/watch?v=..." --api
 
-# Free/local only (no API calls)
-python transcriber.py "https://youtube.com/watch?v=..." --no-api
+# Whisper only — no LLM merging at all
+python transcriber.py "https://youtube.com/watch?v=..." --no-llm
 ```
 
 ## Usage Examples
@@ -79,6 +87,9 @@ python transcriber.py "https://youtube.com/watch?v=..." -o ./my_transcript
 
 # Use specific Whisper models
 python transcriber.py "https://youtube.com/watch?v=..." --whisper-models large
+
+# Use a different local model
+python transcriber.py "https://youtube.com/watch?v=..." --local-model llama3.3
 
 # Adjust slide detection sensitivity (0.0–1.0, lower = more slides)
 python transcriber.py "https://youtube.com/watch?v=..." --scene-threshold 0.15
@@ -118,13 +129,13 @@ output_dir/
 
 ## Pipeline Stages
 
-| Stage | Tool | API Required |
+| Stage | Tool | LLM Required |
 |-------|------|--------------|
 | 1. Download media | yt-dlp | No |
 | 2. Transcribe audio | mlx-whisper | No |
 | 3. Extract slides | ffmpeg | No |
-| 4a. Ensemble Whisper models | Claude + wdiff | Yes |
-| 4b. Merge transcript sources | Claude + wdiff | Yes |
+| 4a. Ensemble Whisper models | LLM + wdiff | Yes (local or API) |
+| 4b. Merge transcript sources | LLM + wdiff | Yes (local or API) |
 | 5. Generate markdown | Python | No |
 | 6. Source survival analysis | wdiff | No |
 
@@ -190,7 +201,8 @@ ESTIMATED API COSTS
 | Source merging (2 sources) | $0.10–$0.30 | $0.50–$1.00 |
 | Source merging (3 sources) | $0.15–$0.40 | $1.00–$2.00 |
 | Slide analysis | $0.50–$2.00 | N/A |
-| `--no-api` | **Free** | **Free** |
+| Local Ollama (default) | **Free** | **Free** |
+| `--no-llm` | **Free** | **Free** |
 
 ## Background
 

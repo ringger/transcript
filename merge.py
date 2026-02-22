@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 
-from shared import SpeechConfig, api_call_with_retry, is_up_to_date
+from shared import SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date
 
 # Ensure print output is flushed immediately
 import functools
@@ -517,12 +517,12 @@ def _compute_chunk_diffs(chunk_texts: list, config: SpeechConfig) -> str:
     return ""
 
 
-def _merge_structured(api_key: str, skeleton_segments: list, all_sources: list,
+def _merge_structured(skeleton_segments: list, all_sources: list,
                       config: SpeechConfig, source_paths: list = None) -> list:
     """Merge transcript sources using blind, label-free presentation.
 
     The skeleton_segments provide structure (speaker labels, timestamps, segment
-    boundaries) from the external transcript. Text is presented to Claude
+    boundaries) from the external transcript. Text is presented to the LLM
     anonymously — no source names, no speaker labels, no timestamps — so that
     no source receives preferential treatment.
 
@@ -538,8 +538,7 @@ def _merge_structured(api_key: str, skeleton_segments: list, all_sources: list,
 
     Returns list of merged segments (same structure as skeleton_segments).
     """
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key)
+    client = create_llm_client(config)
 
     chunks_dir = _init_merge_chunks_dir(config)
 
@@ -654,7 +653,7 @@ Output the merged passages:"""
         prompt_words = len(prompt.split())
         print(f"    Prompt: ~{prompt_words} words ({len(prompt)} chars)")
 
-        message = api_call_with_retry(
+        message = llm_call_with_retry(
             client, config,
             model=config.claude_model,
             max_tokens=16384,
@@ -698,9 +697,9 @@ def _format_structured_segments(segments: list) -> str:
     return "\n".join(lines)
 
 
-def _merge_multi_source(api_key: str, sources: list,
+def _merge_multi_source(sources: list,
                         config: SpeechConfig, source_paths: list = None) -> str:
-    """Merge multiple transcript sources using Claude API with blind presentation.
+    """Merge multiple transcript sources using LLM with blind presentation.
 
     Uses wdiff alignment (not proportional slicing) to split sources into
     aligned chunks. Sources are presented anonymously as Source 1, Source 2, etc.
@@ -711,8 +710,7 @@ def _merge_multi_source(api_key: str, sources: list,
     sources: list of (name, description, text) tuples
     source_paths: list of Path objects for staleness checks
     """
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key)
+    client = create_llm_client(config)
 
     chunks_dir = _init_merge_chunks_dir(config)
 
@@ -789,7 +787,7 @@ Output the merged transcript:"""
         prompt_words = len(prompt.split())
         print(f"    Prompt: ~{prompt_words} words ({len(prompt)} chars)")
 
-        message = api_call_with_retry(
+        message = llm_call_with_retry(
             client, config,
             model=config.claude_model,
             max_tokens=16384,
