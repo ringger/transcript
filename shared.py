@@ -149,7 +149,25 @@ def llm_call_with_retry(client, config: SpeechConfig, **kwargs) -> object:
     Supports both Anthropic and OpenAI-compatible (Ollama) clients.
     Returns a response with .content[0].text and .usage attributes.
     """
-    delay = config.api_initial_backoff
+    def _retry_with_backoff(call_fn, timeout_exc, status_exc, retryable_codes, label):
+        delay = config.api_initial_backoff
+        for attempt in range(1, config.api_max_retries + 1):
+            try:
+                return call_fn()
+            except timeout_exc:
+                if attempt < config.api_max_retries:
+                    print(f"    {label} timeout, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
+            except status_exc as e:
+                if e.status_code in retryable_codes and attempt < config.api_max_retries:
+                    print(f"    {label} {e.status_code} error, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
 
     if config.local:
         # OpenAI-compatible path (Ollama)
@@ -163,46 +181,24 @@ def llm_call_with_retry(client, config: SpeechConfig, **kwargs) -> object:
             "messages": _convert_messages_to_openai(kwargs["messages"]),
         }
 
-        for attempt in range(1, config.api_max_retries + 1):
-            try:
-                response = client.chat.completions.create(**openai_kwargs)
-                return _NormalizedResponse(response)
-            except APITimeoutError:
-                if attempt < config.api_max_retries:
-                    print(f"    LLM timeout, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    raise
-            except APIStatusError as e:
-                if e.status_code in (429, 500, 502, 503) and attempt < config.api_max_retries:
-                    print(f"    LLM {e.status_code} error, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    raise
+        def _call_openai():
+            return _NormalizedResponse(client.chat.completions.create(**openai_kwargs))
+
+        return _retry_with_backoff(
+            _call_openai, APITimeoutError, APIStatusError,
+            (429, 500, 502, 503), "LLM")
     else:
         # Anthropic path
         import anthropic
         if "timeout" not in kwargs:
             kwargs["timeout"] = config.api_timeout
-        for attempt in range(1, config.api_max_retries + 1):
-            try:
-                return client.messages.create(**kwargs)
-            except anthropic.APITimeoutError:
-                if attempt < config.api_max_retries:
-                    print(f"    API timeout, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    raise
-            except anthropic.APIStatusError as e:
-                if e.status_code in (429, 529, 500) and attempt < config.api_max_retries:
-                    print(f"    API {e.status_code} error, retrying in {delay}s (attempt {attempt}/{config.api_max_retries})...")
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    raise
+
+        def _call_anthropic():
+            return client.messages.create(**kwargs)
+
+        return _retry_with_backoff(
+            _call_anthropic, anthropic.APITimeoutError, anthropic.APIStatusError,
+            (429, 529, 500), "API")
 
 
 # Keep old name as alias for backward compatibility in tests

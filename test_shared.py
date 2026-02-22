@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from conftest import make_openai_response
+
 from shared import (
     SpeechConfig,
     _NormalizedResponse,
@@ -284,41 +286,27 @@ class TestApiCallWithRetryTimeout:
 # ---------------------------------------------------------------------------
 
 class TestNormalizedResponse:
-    def _make_openai_response(self, text="hello", prompt_tokens=10, completion_tokens=5):
-        """Build a mock OpenAI ChatCompletion response."""
-        msg = MagicMock()
-        msg.content = text
-        choice = MagicMock()
-        choice.message = msg
-        usage = MagicMock()
-        usage.prompt_tokens = prompt_tokens
-        usage.completion_tokens = completion_tokens
-        resp = MagicMock()
-        resp.choices = [choice]
-        resp.usage = usage
-        return resp
-
     def test_text_access(self):
-        resp = _NormalizedResponse(self._make_openai_response("some text"))
+        resp = _NormalizedResponse(make_openai_response("some text"))
         assert resp.content[0].text == "some text"
 
     def test_usage_tokens(self):
-        resp = _NormalizedResponse(self._make_openai_response(prompt_tokens=42, completion_tokens=7))
+        resp = _NormalizedResponse(make_openai_response(prompt_tokens=42, completion_tokens=7))
         assert resp.usage.input_tokens == 42
         assert resp.usage.output_tokens == 7
 
     def test_none_content_becomes_empty_string(self):
-        resp = _NormalizedResponse(self._make_openai_response(text=None))
+        resp = _NormalizedResponse(make_openai_response(text=None))
         assert resp.content[0].text == ""
 
     def test_zero_tokens(self):
-        resp = _NormalizedResponse(self._make_openai_response(prompt_tokens=0, completion_tokens=0))
+        resp = _NormalizedResponse(make_openai_response(prompt_tokens=0, completion_tokens=0))
         assert resp.usage.input_tokens == 0
         assert resp.usage.output_tokens == 0
 
     def test_no_usage(self):
         """When usage is None (some providers), should default to 0."""
-        raw = self._make_openai_response()
+        raw = make_openai_response()
         raw.usage = None
         resp = _NormalizedResponse(raw)
         assert resp.usage.input_tokens == 0
@@ -464,22 +452,9 @@ class TestLlmCallWithRetryLocal:
         return SpeechConfig(url="x", output_dir=tmp_path, local=True,
                             api_initial_backoff=1, api_max_retries=3)
 
-    def _make_openai_response(self, text="merged text"):
-        msg = MagicMock()
-        msg.content = text
-        choice = MagicMock()
-        choice.message = msg
-        usage = MagicMock()
-        usage.prompt_tokens = 10
-        usage.completion_tokens = 5
-        resp = MagicMock()
-        resp.choices = [choice]
-        resp.usage = usage
-        return resp
-
     def test_success_returns_normalized(self, cfg):
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_openai_response("hello")
+        client.chat.completions.create.return_value = make_openai_response("hello")
         result = llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         assert result.content[0].text == "hello"
         assert result.usage.input_tokens == 10
@@ -487,7 +462,7 @@ class TestLlmCallWithRetryLocal:
 
     def test_uses_local_model(self, cfg):
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_openai_response()
+        client.chat.completions.create.return_value = make_openai_response()
         cfg.local_model = "llama3.3"
         llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         call_kwargs = client.chat.completions.create.call_args[1]
@@ -495,7 +470,7 @@ class TestLlmCallWithRetryLocal:
 
     def test_vision_messages_use_vision_model(self, cfg):
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_openai_response()
+        client.chat.completions.create.return_value = make_openai_response()
         cfg.local_vision_model = "llava-custom"
         msgs = [{"role": "user", "content": [
             {"type": "image", "source": {"data": "abc"}}
@@ -506,7 +481,7 @@ class TestLlmCallWithRetryLocal:
 
     def test_max_tokens_passed(self, cfg):
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_openai_response()
+        client.chat.completions.create.return_value = make_openai_response()
         llm_call_with_retry(client, cfg, max_tokens=2048,
                             messages=[{"role": "user", "content": "hi"}])
         call_kwargs = client.chat.completions.create.call_args[1]
@@ -514,7 +489,7 @@ class TestLlmCallWithRetryLocal:
 
     def test_default_max_tokens(self, cfg):
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_openai_response()
+        client.chat.completions.create.return_value = make_openai_response()
         llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         call_kwargs = client.chat.completions.create.call_args[1]
         assert call_kwargs["max_tokens"] == 4096
@@ -525,7 +500,7 @@ class TestLlmCallWithRetryLocal:
         client = MagicMock()
         client.chat.completions.create.side_effect = [
             APITimeoutError(request=MagicMock()),
-            self._make_openai_response("ok")
+            make_openai_response("ok")
         ]
         result = llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         assert result.content[0].text == "ok"
@@ -542,7 +517,7 @@ class TestLlmCallWithRetryLocal:
             body={"error": {"message": "Rate limited"}},
         )
         client.chat.completions.create.side_effect = [
-            error, self._make_openai_response("ok")
+            error, make_openai_response("ok")
         ]
         result = llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         assert result.content[0].text == "ok"
@@ -558,7 +533,7 @@ class TestLlmCallWithRetryLocal:
             body={"error": {"message": "Server error"}},
         )
         client.chat.completions.create.side_effect = [
-            error, self._make_openai_response("ok")
+            error, make_openai_response("ok")
         ]
         result = llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         assert result.content[0].text == "ok"
@@ -569,7 +544,7 @@ class TestLlmCallWithRetryLocal:
         client = MagicMock()
         timeout_err = APITimeoutError(request=MagicMock())
         client.chat.completions.create.side_effect = [
-            timeout_err, timeout_err, self._make_openai_response()
+            timeout_err, timeout_err, make_openai_response()
         ]
         llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         delays = [call.args[0] for call in mock_sleep.call_args_list]
@@ -600,7 +575,7 @@ class TestLlmCallWithRetryLocal:
     def test_messages_converted_to_openai_format(self, cfg):
         """Verify that Anthropic-style image messages get converted."""
         client = MagicMock()
-        client.chat.completions.create.return_value = self._make_openai_response()
+        client.chat.completions.create.return_value = make_openai_response()
         msgs = [{"role": "user", "content": [
             {"type": "text", "text": "describe"},
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}

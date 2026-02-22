@@ -60,6 +60,11 @@ print = functools.partial(print, flush=True)
 from shared import SpeechConfig, SpeechData, is_up_to_date, create_llm_client, llm_call_with_retry
 
 # Merge logic
+# Whisper model sizes in descending quality order (used for base-model selection)
+MODEL_SIZES = ["large", "medium", "small", "base", "tiny"]
+
+SECTION_SEPARATOR = "=" * 50
+
 from merge import (
     _extract_text_from_html,
     _normalize_for_comparison,
@@ -72,6 +77,66 @@ from merge import (
     _merge_multi_source,
     _wdiff_stats,
 )
+
+
+def _save_json(path: Path, data) -> None:
+    """Write data to a JSON file with standard formatting."""
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def _load_external_transcript(config: SpeechConfig) -> tuple:
+    """Load an external transcript from a URL or file path.
+
+    Returns (text, source_label) or (None, source_label) on failure.
+    """
+    source = config.external_transcript
+    source_label = source
+    if source.startswith(("http://", "https://")):
+        print(f"  Fetching external transcript from URL...")
+        import urllib.request
+        try:
+            with urllib.request.urlopen(source) as response:
+                raw = response.read().decode('utf-8').strip()
+            if '<html' in raw[:500].lower() or '<body' in raw[:1000].lower():
+                text = _extract_text_from_html(raw)
+            else:
+                text = raw
+            source_label = source.split('/')[-1] or source
+            return text, source_label
+        except Exception as e:
+            print(f"  Warning: Could not fetch external transcript URL: {e}")
+            return None, source_label
+    else:
+        ext_path = Path(source)
+        source_label = ext_path.name
+        if ext_path.exists():
+            with open(ext_path, 'r') as f:
+                return f.read().strip(), source_label
+        return None, source_label
+
+
+def _collect_source_paths(config: SpeechConfig, data: SpeechData,
+                          extra: list = None) -> list:
+    """Collect source file paths for DAG staleness checks.
+
+    Includes transcript, captions, and external transcript (if it's a local file).
+    """
+    paths = list(extra or [])
+    if data.transcript_path and data.transcript_path.exists():
+        paths.append(data.transcript_path)
+    if data.captions_path and data.captions_path.exists():
+        paths.append(data.captions_path)
+    if config.external_transcript and not config.external_transcript.startswith(("http://", "https://")):
+        ext_path = Path(config.external_transcript)
+        if ext_path.exists():
+            paths.append(ext_path)
+    return paths
+
+
+def _print_reusing(label: str) -> None:
+    """Print a 'Reusing' message for a cached artifact."""
+    print(f"  Reusing: {label}")
 
 
 def run_command(cmd: list[str], description: str, verbose: bool = False) -> subprocess.CompletedProcess:
@@ -193,8 +258,6 @@ def _dry_run_skip(config: SpeechConfig, action: str, output: str) -> bool:
     print(f"  [dry-run] Would {action} → {output}")
     return True
 
-    print("\n" + "="*50)
-
 
 def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_words: int = 6000) -> None:
     """Print estimated API costs before running."""
@@ -203,16 +266,16 @@ def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_w
     if costs["total"] == 0:
         return
 
-    print("\n" + "="*50)
+    print("\n" + SECTION_SEPARATOR)
     print("ESTIMATED API COSTS")
-    print("="*50)
+    print(SECTION_SEPARATOR)
 
     for detail in costs["details"]:
         print(f"  {detail}")
 
     print(f"\n  TOTAL: ${costs['total']:.2f} (estimate)")
     print("  Note: Actual costs may vary based on transcript length")
-    print("="*50 + "\n")
+    print(SECTION_SEPARATOR + "\n")
 
 
 def download_media(config: SpeechConfig, data: SpeechData) -> None:
@@ -247,14 +310,13 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
         }
         if config.external_transcript:
             metadata["external_transcript"] = config.external_transcript
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
+        _save_json(metadata_path, metadata)
         print(f"  Metadata saved: {metadata_path.name}")
 
     # Download audio
     audio_path = config.output_dir / "audio.mp3"
     if config.skip_existing and audio_path.exists():
-        print(f"  Reusing: {audio_path.name}")
+        _print_reusing(audio_path.name)
     elif not _dry_run_skip(config, "download audio", "audio.mp3"):
         print("  Downloading audio...")
         run_command(
@@ -271,7 +333,7 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
     else:
         video_path = config.output_dir / "video.mp4"
         if config.skip_existing and video_path.exists():
-            print(f"  Reusing: {video_path.name}")
+            _print_reusing(video_path.name)
         elif not _dry_run_skip(config, "download video", "video.mp4"):
             print("  Downloading video...")
             run_command(
@@ -285,7 +347,7 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
     # Download captions if available
     captions_path = config.output_dir / "captions.en.vtt"
     if config.skip_existing and captions_path.exists():
-        print(f"  Reusing: {captions_path.name}")
+        _print_reusing(captions_path.name)
     elif not _dry_run_skip(config, "download captions", "captions.en.vtt"):
         print("  Downloading captions (if available)...")
         try:
@@ -375,7 +437,7 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
 
     # Check if up to date (output newer than audio input)
     if config.skip_existing and is_up_to_date(txt_path, data.audio_path):
-        print(f"  Reusing: {txt_path.name}")
+        _print_reusing(txt_path.name)
         data.whisper_transcripts[model] = {"txt": txt_path, "json": json_path if json_path.exists() else None}
         return
     if _dry_run_skip(config, f"transcribe with Whisper {model}", f"{model}.txt"):
@@ -427,12 +489,11 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
         with open(txt_path, 'w') as f:
             f.write(result["text"])
 
-        with open(json_path, 'w') as f:
-            json.dump({
+        _save_json(json_path, {
                 "text": result["text"],
                 "segments": result.get("segments", []),
                 "language": result.get("language", "en")
-            }, f, indent=2)
+            })
 
     data.whisper_transcripts[model] = {
         "txt": txt_path if txt_path.exists() else None,
@@ -450,11 +511,10 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
         whisper_inputs = [paths["txt"] for paths in data.whisper_transcripts.values()
                          if paths.get("txt")]
         if config.skip_existing and is_up_to_date(ensembled_path, *whisper_inputs):
-            print(f"  Reusing: {ensembled_path.name}")
+            _print_reusing(ensembled_path.name)
             data.transcript_path = ensembled_path
             # Use the largest model's JSON for timestamps
-            model_sizes = ["large", "medium", "small", "base", "tiny"]
-            for size in model_sizes:
+            for size in MODEL_SIZES:
                 if size in data.whisper_transcripts:
                     data.transcript_json_path = data.whisper_transcripts[size].get("json")
                     break
@@ -479,9 +539,8 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
         return
 
     # Start with the largest model as base (usually most accurate)
-    model_sizes = ["large", "medium", "small", "base", "tiny"]
     base_model = None
-    for size in model_sizes:
+    for size in MODEL_SIZES:
         if size in transcripts:
             base_model = size
             break
@@ -668,7 +727,7 @@ def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
 
     existing_slides = list(slides_dir.glob("slide_*.png"))
     if config.skip_existing and existing_slides and is_up_to_date(timestamps_file, data.video_path):
-        print(f"  Reusing: {len(existing_slides)} slides")
+        _print_reusing(f"{len(existing_slides)} slides")
         data.slide_images = sorted(existing_slides)
         # Load existing timestamps
         _load_slide_timestamps(data, timestamps_file)
@@ -713,8 +772,7 @@ def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
         })
 
     # Save timestamps to JSON for reuse
-    with open(timestamps_file, 'w') as f:
-        json.dump(data.slide_timestamps, f, indent=2)
+    _save_json(timestamps_file, data.slide_timestamps)
 
     print(f"  Extracted {len(data.slide_images)} slides with timestamps")
     if data.slide_timestamps:
@@ -754,7 +812,7 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
 
     slides_json_path = config.output_dir / "slides_transcript.json"
     if config.skip_existing and is_up_to_date(slides_json_path, *data.slide_images):
-        print(f"  Reusing: {slides_json_path.name}")
+        _print_reusing(slides_json_path.name)
         with open(slides_json_path, 'r') as f:
             slides_data = json.load(f)
         data.slide_metadata = slides_data.get("slides", [])
@@ -828,12 +886,11 @@ Return ONLY the JSON object, no other text."""
 
     # Save slides JSON
     slides_json_path = config.output_dir / "slides_transcript.json"
-    with open(slides_json_path, 'w') as f:
-        json.dump({
-            "title": data.title,
-            "slide_count": len(slides_metadata),
-            "slides": slides_metadata
-        }, f, indent=2)
+    _save_json(slides_json_path, {
+        "title": data.title,
+        "slide_count": len(slides_metadata),
+        "slides": slides_metadata
+    })
 
     data.slides_json_path = slides_json_path
     print(f"  Slides JSON saved: {slides_json_path.name}")
@@ -860,13 +917,12 @@ def create_basic_slides_json(config: SpeechConfig, data: SpeechData) -> None:
     data.slide_metadata = slides_metadata
 
     slides_json_path = config.output_dir / "slides_basic.json"
-    with open(slides_json_path, 'w') as f:
-        json.dump({
-            "title": data.title,
-            "slide_count": len(slides_metadata),
-            "note": "Basic metadata only - run with --analyze-slides for full analysis",
-            "slides": slides_metadata
-        }, f, indent=2)
+    _save_json(slides_json_path, {
+        "title": data.title,
+        "slide_count": len(slides_metadata),
+        "note": "Basic metadata only - run with --analyze-slides for full analysis",
+        "slides": slides_metadata
+    })
 
     data.slides_json_path = slides_json_path
 
@@ -886,27 +942,7 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     # Load external transcript if provided
     external_text = None
     if config.external_transcript:
-        source_label = config.external_transcript
-        if config.external_transcript.startswith(("http://", "https://")):
-            print(f"  Fetching external transcript from URL...")
-            import urllib.request
-            try:
-                with urllib.request.urlopen(config.external_transcript) as response:
-                    raw = response.read().decode('utf-8').strip()
-                # Convert HTML to text if needed
-                if '<html' in raw[:500].lower() or '<body' in raw[:1000].lower():
-                    external_text = _extract_text_from_html(raw)
-                else:
-                    external_text = raw
-                source_label = config.external_transcript.split('/')[-1] or config.external_transcript
-            except Exception as e:
-                print(f"  Warning: Could not fetch external transcript URL: {e}")
-        else:
-            ext_path = Path(config.external_transcript)
-            if ext_path.exists():
-                with open(ext_path, 'r') as f:
-                    external_text = f.read().strip()
-                source_label = ext_path.name
+        external_text, source_label = _load_external_transcript(config)
         if external_text:
             print(f"  External transcript: {len(external_text.split())} words ({source_label})")
 
@@ -924,15 +960,9 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
 
     merged_path = config.output_dir / "transcript_merged.txt"
 
-    # Inputs: ensembled/whisper transcript, captions, external transcript
-    merge_inputs = [p for p in [data.transcript_path, data.captions_path] if p]
-    # External transcript from file (not URL) is also an input
-    if config.external_transcript and not config.external_transcript.startswith(("http://", "https://")):
-        ext_path = Path(config.external_transcript)
-        if ext_path.exists():
-            merge_inputs.append(ext_path)
+    merge_inputs = _collect_source_paths(config, data)
     if config.skip_existing and is_up_to_date(merged_path, *merge_inputs):
-        print(f"  Reusing: {merged_path.name}")
+        _print_reusing(merged_path.name)
         data.merged_transcript_path = merged_path
         return
     if _dry_run_skip(config, "merge transcript sources", "transcript_merged.txt"):
@@ -1022,15 +1052,7 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
         return
 
     # Gather source files for DAG check
-    analysis_inputs = [merged_path]
-    if data.transcript_path and data.transcript_path.exists():
-        analysis_inputs.append(data.transcript_path)
-    if data.captions_path and data.captions_path.exists():
-        analysis_inputs.append(data.captions_path)
-    if config.external_transcript and not config.external_transcript.startswith(("http://", "https://")):
-        ext_path = Path(config.external_transcript)
-        if ext_path.exists():
-            analysis_inputs.append(ext_path)
+    analysis_inputs = _collect_source_paths(config, data, extra=[merged_path])
 
     if config.skip_existing and is_up_to_date(analysis_path, *analysis_inputs):
         print(f"  Skipping: analysis up to date")
@@ -1062,23 +1084,7 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
 
     # External transcript
     if config.external_transcript:
-        external_text = None
-        if config.external_transcript.startswith(("http://", "https://")):
-            import urllib.request
-            try:
-                with urllib.request.urlopen(config.external_transcript) as response:
-                    raw = response.read().decode('utf-8').strip()
-                if '<html' in raw[:500].lower() or '<body' in raw[:1000].lower():
-                    external_text = _extract_text_from_html(raw)
-                else:
-                    external_text = raw
-            except Exception as e:
-                print(f"  Warning: Could not fetch external transcript: {e}")
-        else:
-            ext_path = Path(config.external_transcript)
-            if ext_path.exists():
-                with open(ext_path, 'r') as f:
-                    external_text = f.read().strip()
+        external_text, _ = _load_external_transcript(config)
         if external_text:
             sources.append(("External transcript", external_text))
 
@@ -1158,7 +1164,7 @@ def generate_markdown(config: SpeechConfig, data: SpeechData) -> None:
     if timestamps_file.exists():
         md_inputs.append(timestamps_file)
     if config.skip_existing and is_up_to_date(markdown_path, *md_inputs):
-        print(f"  Reusing: {markdown_path.name}")
+        _print_reusing(markdown_path.name)
         data.markdown_path = markdown_path
         return
     if _dry_run_skip(config, "generate markdown", "transcript.md"):
@@ -1578,9 +1584,9 @@ Examples:
         print_cost_estimate(config, transcript_words=estimated_words)
 
     if config.dry_run:
-        print("\n" + "="*50)
+        print("\n" + SECTION_SEPARATOR)
         print("DRY RUN - No actions will be taken")
-        print("="*50)
+        print(SECTION_SEPARATOR)
 
     try:
         # Run pipeline — each stage skips if output already exists
@@ -1619,9 +1625,9 @@ Examples:
         analyze_source_survival(config, data)
 
         # Summary
-        print("\n" + "="*50)
+        print("\n" + SECTION_SEPARATOR)
         print("COMPLETE!")
-        print("="*50)
+        print(SECTION_SEPARATOR)
         print(f"\nOutput directory: {config.output_dir}")
         print(f"\nGenerated files:")
         if data.audio_path and data.audio_path.exists():
