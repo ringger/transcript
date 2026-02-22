@@ -95,7 +95,7 @@ python transcriber.py "https://youtube.com/watch?v=..." --local-model llama3.3
 python transcriber.py "https://youtube.com/watch?v=..." --scene-threshold 0.15
 
 # Force re-processing (ignore existing files)
-python transcriber.py "https://youtube.com/watch?v=..." --no-skip
+python transcriber.py "https://youtube.com/watch?v=..." --force
 
 # Verbose output
 python transcriber.py "https://youtube.com/watch?v=..." -v
@@ -120,10 +120,10 @@ output_dir/
 │   ├── .version
 │   ├── chunk_000.json
 │   └── ...
+├── slide_timestamps.json         # Slide timing data
+├── slides_transcript.json        # (if --analyze-slides)
 └── slides/                       # (if slides enabled)
     ├── slide_0001.png
-    ├── slide_timestamps.json
-    ├── slides_transcript.json    # (if --analyze-slides)
     └── ...
 ```
 
