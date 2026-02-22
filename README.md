@@ -23,19 +23,11 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 
 ```bash
 # Required tools
-brew install ffmpeg wdiff
-pip install yt-dlp mlx-whisper
+brew install ffmpeg wdiff    # macOS
+# apt install ffmpeg wdiff   # Ubuntu/Debian
 
-# Required for merge/ensemble features
-pip install anthropic
-```
-
-### Apple Silicon
-
-This tool is optimized for Apple Silicon Macs using `mlx-whisper`. On other platforms, it falls back to `openai-whisper`:
-
-```bash
-pip install openai-whisper  # For non-Apple Silicon
+# Install Python dependencies (auto-selects mlx-whisper on Apple Silicon, openai-whisper elsewhere)
+pip install -r requirements.txt
 ```
 
 ## Quick Start
