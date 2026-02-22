@@ -137,6 +137,8 @@ class TestDownloadMedia:
         assert "[dry-run]" in out
         # Only the info fetch should run (not dry-run gated)
         assert mock_run.call_count == 1
+        # Dry-run should not create any files
+        assert not (tmp_path / "metadata.json").exists()
 
     @patch("download.run_command", side_effect=_mock_run_command_for_download)
     def test_saves_metadata(self, mock_run, tmp_path):
@@ -160,3 +162,17 @@ class TestDownloadMedia:
         download_media(config, data)
         metadata = json.loads((tmp_path / "metadata.json").read_text())
         assert metadata["external_transcript"] == "https://example.com/transcript.txt"
+
+    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    def test_podcast_skips_video_and_captions(self, mock_run, tmp_path, capsys):
+        config = SpeechConfig(url="https://example.com/podcast/ep1", output_dir=tmp_path,
+                              podcast=True, no_slides=True, skip_existing=False)
+        data = SpeechData()
+        download_media(config, data)
+        out = capsys.readouterr().out
+        assert "Skipping video download (--podcast)" in out
+        assert "Skipping captions download (--podcast)" in out
+        assert data.audio_path == tmp_path / "audio.mp3"
+        assert data.video_path is None
+        # info + audio only (no video, no captions)
+        assert mock_run.call_count == 2

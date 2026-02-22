@@ -35,6 +35,7 @@ class SpeechConfig:
     claude_model: str = "claude-sonnet-4-20250514"
     skip_existing: bool = True
     no_slides: bool = False  # Skip slide extraction entirely
+    podcast: bool = False  # Podcast mode: audio-only, skip video + captions
     external_transcript: Optional[str] = None  # External transcript file path or URL to include in merge
     dry_run: bool = False  # Show what would be done without doing it
     verbose: bool = False

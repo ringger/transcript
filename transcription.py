@@ -24,7 +24,7 @@ def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
     """Transcribe audio using Whisper, supporting multiple models for ensembling."""
     print("\n[2/5] Transcribing audio...")
 
-    if not data.audio_path or not data.audio_path.exists():
+    if not config.dry_run and (not data.audio_path or not data.audio_path.exists()):
         raise FileNotFoundError(f"Audio file not found: {data.audio_path}")
 
     deps = check_dependencies()
@@ -47,6 +47,9 @@ def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
         if model in data.whisper_transcripts:
             data.transcript_path = data.whisper_transcripts[model]["txt"]
             data.transcript_json_path = data.whisper_transcripts[model].get("json")
+
+    if config.dry_run:
+        return
 
     if not data.transcript_path:
         raise FileNotFoundError("Transcript file not found after transcription")

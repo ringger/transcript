@@ -429,12 +429,13 @@ Examples:
   %(prog)s "https://youtube.com/watch?v=..." --whisper-models small,medium
   %(prog)s "https://youtube.com/watch?v=..." --no-slides --external-transcript URL
   %(prog)s "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
+  %(prog)s --podcast "https://www.iheart.com/podcast/.../episode/..."
         """
     )
 
     # Input
     input_group = parser.add_argument_group("input")
-    input_group.add_argument("url", help="URL of the speech video")
+    input_group.add_argument("url", help="URL of the speech video or podcast episode")
     input_group.add_argument("--external-transcript",
                         help="Path or URL to an external transcript to include in the merge process")
 
@@ -454,6 +455,8 @@ Examples:
     slides_group = parser.add_argument_group("slides")
     slides_group.add_argument("--no-slides", action="store_true",
                         help="Skip slide extraction entirely (audio/transcript only)")
+    input_group.add_argument("--podcast", action="store_true",
+                        help="Podcast mode: audio-only, skip video and captions download (implies --no-slides)")
     slides_group.add_argument("--scene-threshold", type=float, default=0.1,
                         help="Scene detection threshold 0-1 (default: 0.1)")
     slides_group.add_argument("--analyze-slides", action="store_true",
@@ -516,7 +519,8 @@ Examples:
     else:
         output_dir = Path("./transcripts/speech")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse whisper models (comma-separated)
     whisper_models = [m.strip() for m in args.whisper_models.split(",")]
@@ -530,13 +534,18 @@ Examples:
     # Determine LLM backend: --api or --api-key switches to cloud API
     use_api = args.api or bool(args.api_key)
 
+    # Podcast mode implies --no-slides
+    is_podcast = getattr(args, 'podcast', False)
+    no_slides = args.no_slides or is_podcast
+
     # Create config
     config = SpeechConfig(
         url=args.url,
         output_dir=output_dir,
         whisper_models=whisper_models,
         scene_threshold=args.scene_threshold,
-        no_slides=args.no_slides,
+        no_slides=no_slides,
+        podcast=is_podcast,
         analyze_slides=args.analyze_slides,
         merge_sources=not args.no_merge,
         external_transcript=args.external_transcript,
@@ -630,7 +639,7 @@ Examples:
         download_media(config, data)
 
         # Update output dir with actual title
-        if data.title and not args.output_dir:
+        if data.title and not args.output_dir and not config.dry_run:
             safe_title = re.sub(r'[^\w\s-]', '', data.title)[:50].strip()
             safe_title = re.sub(r'\s+', '-', safe_title).lower()
             new_output_dir = Path(f"./transcripts/{safe_title}")

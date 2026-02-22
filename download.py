@@ -38,7 +38,9 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
 
     # Save source metadata
     metadata_path = config.output_dir / "metadata.json"
-    if not metadata_path.exists() or not config.skip_existing:
+    if config.dry_run:
+        print(f"  [dry-run] Would save metadata → {metadata_path.name}")
+    elif not metadata_path.exists() or not config.skip_existing:
         metadata = {
             "url": config.url,
             "video_id": info.get("id"),
@@ -68,8 +70,9 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
     data.audio_path = audio_path
 
     # Download video (only needed for slide extraction)
-    if config.no_slides:
-        print("  Skipping video download (--no-slides)")
+    if config.podcast or config.no_slides:
+        print("  Skipping video download (--podcast)" if config.podcast
+              else "  Skipping video download (--no-slides)")
     else:
         video_path = config.output_dir / "video.mp4"
         if config.skip_existing and video_path.exists():
@@ -84,9 +87,11 @@ def download_media(config: SpeechConfig, data: SpeechData) -> None:
             )
         data.video_path = video_path
 
-    # Download captions if available
+    # Download captions if available (skip for podcasts — no captions)
     captions_path = config.output_dir / "captions.en.vtt"
-    if config.skip_existing and captions_path.exists():
+    if config.podcast:
+        print("  Skipping captions download (--podcast)")
+    elif config.skip_existing and captions_path.exists():
         _print_reusing(captions_path.name)
     elif not _dry_run_skip(config, "download captions", "captions.en.vtt"):
         print("  Downloading captions (if available)...")

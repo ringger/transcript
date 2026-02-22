@@ -57,10 +57,18 @@ python transcriber.py "https://youtube.com/watch?v=..." --no-llm
 
 ## Usage Examples
 
+### Podcast
+
+```bash
+# Podcast episode — audio only, no video or captions
+python transcriber.py --podcast "https://www.iheart.com/podcast/.../episode/..."
+python transcriber.py --podcast "https://podcasts.apple.com/us/podcast/..."
+```
+
 ### Speech-Only (No Slides)
 
 ```bash
-# Podcast or interview — skip slide extraction
+# YouTube talk or interview — skip slide extraction
 python transcriber.py "https://youtube.com/watch?v=..." --no-slides
 
 # With external transcript for higher accuracy
