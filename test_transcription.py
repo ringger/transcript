@@ -14,6 +14,7 @@ from transcription import (
     _resolve_whisper_chunk,
     _resolve_whisper_differences,
     _run_whisper_model,
+    _select_largest_model_json,
     transcribe_audio,
 )
 
@@ -491,3 +492,30 @@ class TestTranscribeAudio:
         mock_run.return_value = None
         with pytest.raises(FileNotFoundError, match="Transcript file not found"):
             transcribe_audio(config, data)
+
+
+# ---------------------------------------------------------------------------
+# _select_largest_model_json
+# ---------------------------------------------------------------------------
+
+class TestSelectLargestModelJson:
+    def test_returns_largest_available(self, tmp_path):
+        json_medium = tmp_path / "medium.json"
+        json_small = tmp_path / "small.json"
+        data = SpeechData()
+        data.whisper_transcripts = {
+            "small": {"txt": tmp_path / "small.txt", "json": json_small},
+            "medium": {"txt": tmp_path / "medium.txt", "json": json_medium},
+        }
+        assert _select_largest_model_json(data) == json_medium
+
+    def test_returns_none_when_empty(self):
+        data = SpeechData()
+        assert _select_largest_model_json(data) is None
+
+    def test_returns_none_when_json_missing(self, tmp_path):
+        data = SpeechData()
+        data.whisper_transcripts = {
+            "small": {"txt": tmp_path / "small.txt", "json": None},
+        }
+        assert _select_largest_model_json(data) is None

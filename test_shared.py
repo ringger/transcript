@@ -20,6 +20,7 @@ from shared import (
     _dry_run_skip,
     _has_vision_content,
     _save_json,
+    _should_skip,
     api_call_with_retry,
     check_dependencies,
     create_llm_client,
@@ -660,7 +661,7 @@ class TestRunCommand:
         with pytest.raises(subprocess.CalledProcessError):
             run_command(["bad"], "bad command")
         out = capsys.readouterr().out
-        assert "Error during bad command" in out
+        assert "Error: bad command" in out
         assert "something broke" in out
 
 
@@ -806,3 +807,54 @@ class TestSaveJson:
         loaded = json.loads(path.read_text())
         assert "new" in loaded
         assert "old" not in loaded
+
+
+# ---------------------------------------------------------------------------
+# _should_skip
+# ---------------------------------------------------------------------------
+
+class TestShouldSkip:
+    def test_skips_when_output_is_fresh(self, tmp_path, capsys):
+        inp = tmp_path / "input.txt"
+        inp.write_text("data")
+        time.sleep(0.05)
+        out = tmp_path / "output.txt"
+        out.write_text("result")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        assert _should_skip(config, out, "process data", inp) is True
+        captured = capsys.readouterr().out
+        assert "Reusing: output.txt" in captured
+
+    def test_does_not_skip_when_output_is_stale(self, tmp_path, capsys):
+        out = tmp_path / "output.txt"
+        out.write_text("old result")
+        time.sleep(0.05)
+        inp = tmp_path / "input.txt"
+        inp.write_text("newer data")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        assert _should_skip(config, out, "process data", inp) is False
+
+    def test_skips_in_dry_run(self, tmp_path, capsys):
+        inp = tmp_path / "input.txt"
+        inp.write_text("data")
+        out = tmp_path / "output.txt"  # does not exist
+        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True)
+        assert _should_skip(config, out, "process data", inp) is True
+        captured = capsys.readouterr().out
+        assert "[dry-run]" in captured
+
+    def test_does_not_skip_when_output_missing(self, tmp_path):
+        inp = tmp_path / "input.txt"
+        inp.write_text("data")
+        out = tmp_path / "output.txt"
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        assert _should_skip(config, out, "process data", inp) is False
+
+    def test_does_not_skip_when_skip_existing_is_false(self, tmp_path):
+        inp = tmp_path / "input.txt"
+        inp.write_text("data")
+        time.sleep(0.05)
+        out = tmp_path / "output.txt"
+        out.write_text("result")
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        assert _should_skip(config, out, "process data", inp) is False

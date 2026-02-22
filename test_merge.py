@@ -31,6 +31,7 @@ from merge import (
     _parse_wdiff_tokens,
     _save_chunk_checkpoint,
     _wdiff_stats,
+    _write_temp_text,
 )
 
 
@@ -1292,3 +1293,29 @@ class TestChunkCheckpoints:
         assert (tmp_path / "chunk_099.json").exists()
         loaded = _load_chunk_checkpoint(tmp_path, 99)
         assert loaded == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# _write_temp_text
+# ---------------------------------------------------------------------------
+
+class TestWriteTempText:
+    def test_creates_file_with_content(self):
+        import os
+        path = _write_temp_text("hello world")
+        try:
+            assert os.path.exists(path)
+            with open(path) as f:
+                assert f.read() == "hello world"
+        finally:
+            os.unlink(path)
+
+    def test_returns_unique_paths(self):
+        import os
+        p1 = _write_temp_text("a")
+        p2 = _write_temp_text("b")
+        try:
+            assert p1 != p2
+        finally:
+            os.unlink(p1)
+            os.unlink(p2)

@@ -17,7 +17,7 @@ from pathlib import Path
 from shared import (
     SpeechConfig, SpeechData, is_up_to_date,
     create_llm_client, llm_call_with_retry,
-    _save_json, _print_reusing, _dry_run_skip,
+    _save_json, _print_reusing, _dry_run_skip, _should_skip,
 )
 
 
@@ -36,10 +36,8 @@ def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
     timestamps_file = config.output_dir / "slide_timestamps.json"
 
     existing_slides = list(slides_dir.glob("slide_*.png"))
-    if config.skip_existing and existing_slides and is_up_to_date(timestamps_file, data.video_path):
-        _print_reusing(f"{len(existing_slides)} slides")
+    if existing_slides and _should_skip(config, timestamps_file, "extract slides from video", data.video_path):
         data.slide_images = sorted(existing_slides)
-        # Load existing timestamps
         _load_slide_timestamps(data, timestamps_file)
         return
     if _dry_run_skip(config, "extract slides from video", "slides/*.png"):
@@ -121,14 +119,12 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
         return
 
     slides_json_path = config.output_dir / "slides_transcript.json"
-    if config.skip_existing and is_up_to_date(slides_json_path, *data.slide_images):
-        _print_reusing(slides_json_path.name)
-        with open(slides_json_path, 'r') as f:
-            slides_data = json.load(f)
-        data.slide_metadata = slides_data.get("slides", [])
-        data.slides_json_path = slides_json_path
-        return
-    if _dry_run_skip(config, "analyze slides with vision LLM", "slides_transcript.json"):
+    if _should_skip(config, slides_json_path, "analyze slides with vision LLM", *data.slide_images):
+        if slides_json_path.exists():
+            with open(slides_json_path, 'r') as f:
+                slides_data = json.load(f)
+            data.slide_metadata = slides_data.get("slides", [])
+            data.slides_json_path = slides_json_path
         return
 
     client = create_llm_client(config)
@@ -209,10 +205,9 @@ Return ONLY the JSON object, no other text."""
 def create_basic_slides_json(config: SpeechConfig, data: SpeechData) -> None:
     """Create a basic slides JSON without vision analysis."""
     slides_json_path = config.output_dir / "slides_basic.json"
-    if config.skip_existing and is_up_to_date(slides_json_path, *data.slide_images):
-        data.slides_json_path = slides_json_path
-        return
-    if _dry_run_skip(config, "create basic slides JSON", "slides_basic.json"):
+    if _should_skip(config, slides_json_path, "create basic slides JSON", *data.slide_images):
+        if slides_json_path.exists():
+            data.slides_json_path = slides_json_path
         return
 
     slides_metadata = []

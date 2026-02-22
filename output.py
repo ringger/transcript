@@ -13,7 +13,7 @@ print = functools.partial(print, flush=True)
 
 from shared import (
     SpeechConfig, SpeechData, is_up_to_date,
-    _print_reusing, _dry_run_skip,
+    _print_reusing, _dry_run_skip, _should_skip,
 )
 
 
@@ -29,11 +29,9 @@ def generate_markdown(config: SpeechConfig, data: SpeechData) -> None:
     timestamps_file = config.output_dir / "slide_timestamps.json"
     if timestamps_file.exists():
         md_inputs.append(timestamps_file)
-    if config.skip_existing and is_up_to_date(markdown_path, *md_inputs):
-        _print_reusing(markdown_path.name)
-        data.markdown_path = markdown_path
-        return
-    if _dry_run_skip(config, "generate markdown", "transcript.md"):
+    if _should_skip(config, markdown_path, "generate markdown", *md_inputs):
+        if markdown_path.exists():
+            data.markdown_path = markdown_path
         return
 
     # Determine if we can do timestamp-based placement

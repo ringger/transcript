@@ -50,11 +50,31 @@ from pathlib import Path
 
 from shared import (
     SpeechConfig, SpeechData, is_up_to_date,
-    run_command, _print_reusing, _dry_run_skip, _collect_source_paths,
-    check_dependencies,
+    run_command, _print_reusing, _dry_run_skip, _should_skip,
+    _collect_source_paths, check_dependencies,
 )
 
 SECTION_SEPARATOR = "=" * 50
+
+# API pricing per 1K tokens, keyed by model family prefix (as of 2025-05)
+MODEL_PRICING = {
+    "claude-opus-4":   {"input": 0.015, "output": 0.075},
+    "claude-sonnet-4": {"input": 0.003, "output": 0.015},
+    "claude-sonnet-3": {"input": 0.003, "output": 0.015},
+    "claude-haiku-4":  {"input": 0.001, "output": 0.005},
+    "claude-haiku-3":  {"input": 0.0008, "output": 0.004},
+}
+DEFAULT_PRICING = MODEL_PRICING["claude-sonnet-4"]  # fallback
+VISION_COST_PER_IMAGE = 0.02               # ~$0.01-0.02 per medium slide
+TOKENS_PER_WORD = 1.3                      # rough word-to-token ratio
+
+
+def _get_model_pricing(model_name: str) -> dict:
+    """Return {input, output} cost per 1K tokens for the given model name."""
+    for prefix, pricing in MODEL_PRICING.items():
+        if model_name.startswith(prefix):
+            return pricing
+    return DEFAULT_PRICING
 
 # Pipeline stage modules
 from download import download_media, clean_vtt_captions
@@ -109,11 +129,7 @@ def _load_external_transcript(config: SpeechConfig) -> tuple:
 def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_words: int = 6000) -> dict:
     """Estimate API costs for the configured options.
 
-    Pricing estimates (Claude Sonnet 4):
-    - Input: $3 per 1M tokens (~$0.003 per 1K tokens)
-    - Output: $15 per 1M tokens (~$0.015 per 1K tokens)
-    - Vision: ~$0.01-0.02 per image (varies by size)
-
+    Pricing is looked up from MODEL_PRICING based on config.claude_model.
     Returns dict with cost breakdown and total.
     """
     costs = {
@@ -124,46 +140,41 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
         "details": []
     }
 
-    # Estimate tokens (rough: 1 word ≈ 1.3 tokens)
-    transcript_tokens = int(transcript_words * 1.3)
+    if config.no_llm:
+        return costs
 
-    if config.analyze_slides and not config.no_llm:
-        # Vision API: ~$0.02 per image for medium-sized slides
-        slide_cost = num_slides * 0.02
+    pricing = _get_model_pricing(config.claude_model)
+
+    if config.analyze_slides:
+        slide_cost = num_slides * VISION_COST_PER_IMAGE
         costs["analyze_slides"] = slide_cost
-        costs["details"].append(f"Slide analysis: {num_slides} slides × $0.02 = ${slide_cost:.2f}")
+        costs["details"].append(f"Slide analysis: {num_slides} slides × ${VISION_COST_PER_IMAGE} = ${slide_cost:.2f}")
 
-    if config.merge_sources and not config.no_llm:
-        # Count merge sources: Whisper + YouTube captions + optional external
+    if config.merge_sources:
         num_sources = 2  # Whisper + YouTube
         if config.external_transcript:
             num_sources += 1
-        # Each chunk sends all sources as input, output ≈ 1x base transcript
         num_chunks = max(1, transcript_words // config.merge_chunk_words + 1)
-        # Input per chunk: all sources (~transcript_words * num_sources / num_chunks)
-        #   + wdiff differences summary (~500 tokens overhead)
-        # Output per chunk: ~transcript_words / num_chunks
         chunk_input_words = transcript_words * num_sources // num_chunks + 500
         chunk_output_words = transcript_words // num_chunks
-        total_input_tokens = int(chunk_input_words * num_chunks * 1.3)
-        total_output_tokens = int(chunk_output_words * num_chunks * 1.3)
-        input_cost = total_input_tokens * 0.003 / 1000
-        output_cost = total_output_tokens * 0.015 / 1000
+        total_input_tokens = int(chunk_input_words * num_chunks * TOKENS_PER_WORD)
+        total_output_tokens = int(chunk_output_words * num_chunks * TOKENS_PER_WORD)
+        input_cost = total_input_tokens * pricing["input"] / 1000
+        output_cost = total_output_tokens * pricing["output"] / 1000
         merge_cost = input_cost + output_cost
         costs["merge_sources"] = merge_cost
         costs["details"].append(
             f"Source merging: {num_sources} sources × {num_chunks} chunks = ${merge_cost:.2f}")
 
-    if len(config.whisper_models) > 1 and not config.no_llm:
-        # Ensemble: chunked processing, each chunk sends base + other models + diffs
+    if len(config.whisper_models) > 1:
         num_models = len(config.whisper_models)
         num_chunks = max(1, transcript_words // config.merge_chunk_words + 1)
         chunk_input_words = transcript_words * num_models // num_chunks + 500
         chunk_output_words = transcript_words // num_chunks
-        total_input_tokens = int(chunk_input_words * num_chunks * 1.3)
-        total_output_tokens = int(chunk_output_words * num_chunks * 1.3)
-        input_cost = total_input_tokens * 0.003 / 1000
-        output_cost = total_output_tokens * 0.015 / 1000
+        total_input_tokens = int(chunk_input_words * num_chunks * TOKENS_PER_WORD)
+        total_output_tokens = int(chunk_output_words * num_chunks * TOKENS_PER_WORD)
+        input_cost = total_input_tokens * pricing["input"] / 1000
+        output_cost = total_output_tokens * pricing["output"] / 1000
         ensemble_cost = input_cost + output_cost
         costs["ensemble_whisper"] = ensemble_cost
         costs["details"].append(
@@ -188,7 +199,7 @@ def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_w
     for detail in costs["details"]:
         print(f"  {detail}")
 
-    print(f"\n  TOTAL: ${costs['total']:.2f} (estimate)")
+    print(f"\n  TOTAL: ${costs['total']:.2f} (estimate, using {config.claude_model})")
     print("  Note: Actual costs may vary based on transcript length")
     print(SECTION_SEPARATOR + "\n")
 
@@ -227,11 +238,9 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     merged_path = config.output_dir / "transcript_merged.txt"
 
     merge_inputs = _collect_source_paths(config, data)
-    if config.skip_existing and is_up_to_date(merged_path, *merge_inputs):
-        _print_reusing(merged_path.name)
-        data.merged_transcript_path = merged_path
-        return
-    if _dry_run_skip(config, "merge transcript sources", "transcript_merged.txt"):
+    if _should_skip(config, merged_path, "merge transcript sources", *merge_inputs):
+        if merged_path.exists():
+            data.merged_transcript_path = merged_path
         return
 
     # Load available transcripts
@@ -320,10 +329,7 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     # Gather source files for DAG check
     analysis_inputs = _collect_source_paths(config, data, extra=[merged_path])
 
-    if config.skip_existing and is_up_to_date(analysis_path, *analysis_inputs):
-        print(f"  Skipping: analysis up to date")
-        return
-    if _dry_run_skip(config, "analyze source survival", "analysis.md"):
+    if _should_skip(config, analysis_path, "analyze source survival", *analysis_inputs):
         return
 
     # Read merged transcript
@@ -535,8 +541,7 @@ Examples:
     use_api = args.api or bool(args.api_key)
 
     # Podcast mode implies --no-slides
-    is_podcast = getattr(args, 'podcast', False)
-    no_slides = args.no_slides or is_podcast
+    no_slides = args.no_slides or args.podcast
 
     # Create config
     config = SpeechConfig(
@@ -545,7 +550,7 @@ Examples:
         whisper_models=whisper_models,
         scene_threshold=args.scene_threshold,
         no_slides=no_slides,
-        podcast=is_podcast,
+        podcast=args.podcast,
         analyze_slides=args.analyze_slides,
         merge_sources=not args.no_merge,
         external_transcript=args.external_transcript,

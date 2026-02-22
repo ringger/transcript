@@ -14,10 +14,18 @@ print = functools.partial(print, flush=True)
 from shared import (
     SpeechConfig, SpeechData, is_up_to_date,
     create_llm_client, llm_call_with_retry,
-    run_command, _save_json, _print_reusing, _dry_run_skip,
+    run_command, _save_json, _print_reusing, _dry_run_skip, _should_skip,
     check_dependencies, MODEL_SIZES,
 )
 from merge import _analyze_differences_wdiff, _filter_meaningful_diffs
+
+
+def _select_largest_model_json(data: SpeechData):
+    """Return the JSON path from the largest available Whisper model."""
+    for size in MODEL_SIZES:
+        if size in data.whisper_transcripts:
+            return data.whisper_transcripts[size].get("json")
+    return None
 
 
 def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
@@ -65,11 +73,9 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
     json_path = config.output_dir / f"{model}.json"
 
     # Check if up to date (output newer than audio input)
-    if config.skip_existing and is_up_to_date(txt_path, data.audio_path):
-        _print_reusing(txt_path.name)
-        data.whisper_transcripts[model] = {"txt": txt_path, "json": json_path if json_path.exists() else None}
-        return
-    if _dry_run_skip(config, f"transcribe with Whisper {model}", f"{model}.txt"):
+    if _should_skip(config, txt_path, f"transcribe with Whisper {model}", data.audio_path):
+        if txt_path.exists():
+            data.whisper_transcripts[model] = {"txt": txt_path, "json": json_path if json_path.exists() else None}
         return
     print(f"  Running Whisper {model}...")
 
@@ -139,16 +145,10 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
         # Inputs are the individual whisper transcripts
         whisper_inputs = [paths["txt"] for paths in data.whisper_transcripts.values()
                          if paths.get("txt")]
-        if config.skip_existing and is_up_to_date(ensembled_path, *whisper_inputs):
-            _print_reusing(ensembled_path.name)
-            data.transcript_path = ensembled_path
-            # Use the largest model's JSON for timestamps
-            for size in MODEL_SIZES:
-                if size in data.whisper_transcripts:
-                    data.transcript_json_path = data.whisper_transcripts[size].get("json")
-                    break
-            return
-        if _dry_run_skip(config, "ensemble Whisper transcripts", "ensembled.txt"):
+        if _should_skip(config, ensembled_path, "ensemble Whisper transcripts", *whisper_inputs):
+            if ensembled_path.exists():
+                data.transcript_path = ensembled_path
+                data.transcript_json_path = _select_largest_model_json(data)
             return
     print(f"  Ensembling {len(data.whisper_transcripts)} Whisper transcripts...")
 
@@ -214,9 +214,7 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
     data.transcript_path = ensembled_path
     print(f"  Ensembled transcript saved: {ensembled_path.name}")
 
-    # Use the largest model's JSON for timestamps
-    if base_model in data.whisper_transcripts:
-        data.transcript_json_path = data.whisper_transcripts[base_model].get("json")
+    data.transcript_json_path = _select_largest_model_json(data)
 
 
 def _resolve_whisper_differences(base_text: str, all_transcripts: dict,

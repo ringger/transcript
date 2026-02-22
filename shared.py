@@ -227,7 +227,7 @@ def run_command(cmd: list[str], description: str, verbose: bool = False) -> subp
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result
     except subprocess.CalledProcessError as e:
-        print(f"  Error during {description}:")
+        print(f"  Error: {description}")
         print(f"  {e.stderr}")
         raise
 
@@ -249,6 +249,23 @@ def _dry_run_skip(config: SpeechConfig, action: str, output: str) -> bool:
         return False
     print(f"  [dry-run] Would {action} → {output}")
     return True
+
+
+def _should_skip(config: SpeechConfig, output: Path, action: str,
+                  *inputs: Path) -> bool:
+    """Check if a pipeline stage should skip: output is fresh or dry-run mode.
+
+    Combines the is_up_to_date + _print_reusing + _dry_run_skip pattern
+    that repeats across all pipeline stages.
+
+    Returns True if the stage should skip (and prints the reason).
+    """
+    if config.skip_existing and is_up_to_date(output, *inputs):
+        _print_reusing(output.name)
+        return True
+    if _dry_run_skip(config, action, output.name):
+        return True
+    return False
 
 
 def _collect_source_paths(config: SpeechConfig, data: SpeechData,

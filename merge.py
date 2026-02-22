@@ -11,11 +11,22 @@ import re
 import shutil
 import subprocess
 
-from shared import SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date
+from shared import SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date, _save_json
 
 # Ensure print output is flushed immediately
 import functools
 print = functools.partial(print, flush=True)
+
+
+def _write_temp_text(content: str) -> str:
+    """Write content to a temporary text file, return its path.
+
+    Caller is responsible for cleanup with os.unlink().
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write(content)
+        return f.name
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -108,20 +119,12 @@ def _analyze_differences_wdiff(text_a: str, text_b: str, config: SpeechConfig,
             print("  wdiff not found, skipping diff analysis")
         return []
 
-    import tempfile
-
     # Normalize both texts for comparison
     a_normalized = _normalize_for_comparison(text_a)
     b_normalized = _normalize_for_comparison(text_b)
 
-    # Write normalized texts to temp files
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f1:
-        f1.write(a_normalized)
-        a_file = f1.name
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f2:
-        f2.write(b_normalized)
-        b_file = f2.name
+    a_file = _write_temp_text(a_normalized)
+    b_file = _write_temp_text(b_normalized)
 
     try:
         # Run wdiff
@@ -237,20 +240,14 @@ def _build_wdiff_alignment(text_a: str, text_b: str,
     in text_a. The extra entry at the end provides the boundary for the
     last segment.
     """
-    import tempfile
-
     norm_a = _normalize_for_comparison(text_a)
     norm_b = _normalize_for_comparison(text_b)
 
     a_path = None
     b_path = None
     try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(norm_a)
-            a_path = f.name
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(norm_b)
-            b_path = f.name
+        a_path = _write_temp_text(norm_a)
+        b_path = _write_temp_text(norm_b)
 
         result = subprocess.run(
             ["wdiff", a_path, b_path],
@@ -305,42 +302,63 @@ def _format_differences(differences: list) -> str:
     return diff_text
 
 
+# Transcript structure detection patterns
+# "Speaker Name [(HH:MM:SS)](url)" or "Speaker Name (HH:MM:SS)" (Lex Fridman style)
+LEX_PATTERN = re.compile(r'^(\w[\w\s]+?)\s*\[?\((\d{1,2}:\d{2}:\d{2})\)\]?')
+# "[HH:MM:SS] Speaker: text"
+BRACKETED_PATTERN = re.compile(r'^\[(\d{1,2}:\d{2}:\d{2})\]\s+(\w[\w\s]+?):')
+# "Speaker Name: text" (no timestamps)
+SPEAKER_ONLY_PATTERN = re.compile(r'^([A-Z][\w]+(?:\s+[A-Z][\w]+)*)\s*:\s+\S')
+
+# Ordered detection: try each pattern, first match wins
+_STRUCTURE_FORMATS = [
+    ("lex",          LEX_PATTERN,          True,  True),
+    ("bracketed",    BRACKETED_PATTERN,    True,  True),
+    ("speaker_only", SPEAKER_ONLY_PATTERN, True,  False),
+]
+
+
 def _detect_transcript_structure(text: str) -> dict:
     """Detect if a transcript has speaker labels and/or timestamps.
 
     Returns dict with keys: has_speakers, has_timestamps, format.
-    Supported formats:
-      - "lex": "Speaker Name [(HH:MM:SS)](url) text" (Lex Fridman style)
-      - "bracketed": "[HH:MM:SS] Speaker: text"
-      - "speaker_only": "Speaker: text" (no timestamps)
-      - None: unstructured text
+    Supported formats: "lex", "bracketed", "speaker_only", or None.
     """
     lines = text.strip().split('\n')
-    # Skip header lines (title, blank lines at start)
     content_lines = [l for l in lines if l.strip() and not l.strip().startswith('#')]
-
-    # Sample first 20 content lines for pattern detection
     sample = content_lines[:20]
 
-    # Lex Fridman format: "Speaker Name [(HH:MM:SS)](url)" or extracted "Speaker Name (HH:MM:SS)"
-    lex_pattern = re.compile(r'^(\w[\w\s]+?)\s*\[?\((\d{1,2}:\d{2}:\d{2})\)\]?')
-    lex_matches = sum(1 for line in sample if lex_pattern.match(line))
-    if lex_matches >= 2:
-        return {"has_speakers": True, "has_timestamps": True, "format": "lex"}
-
-    # Bracketed format: "[HH:MM:SS] Speaker:"
-    bracketed_pattern = re.compile(r'^\[(\d{1,2}:\d{2}:\d{2})\]\s+(\w[\w\s]+?):')
-    bracketed_matches = sum(1 for line in sample if bracketed_pattern.match(line))
-    if bracketed_matches >= 2:
-        return {"has_speakers": True, "has_timestamps": True, "format": "bracketed"}
-
-    # Speaker only: "Name Name:" at start of line, followed by text
-    speaker_pattern = re.compile(r'^([A-Z][\w]+(?:\s+[A-Z][\w]+)*)\s*:\s+\S')
-    speaker_matches = sum(1 for line in sample if speaker_pattern.match(line))
-    if speaker_matches >= 2:
-        return {"has_speakers": True, "has_timestamps": False, "format": "speaker_only"}
+    for fmt, pattern, has_speakers, has_timestamps in _STRUCTURE_FORMATS:
+        if sum(1 for line in sample if pattern.match(line)) >= 2:
+            return {"has_speakers": has_speakers, "has_timestamps": has_timestamps, "format": fmt}
 
     return {"has_speakers": False, "has_timestamps": False, "format": None}
+
+
+def _extract_segment_fields(fmt: str, match: re.Match, line: str) -> dict:
+    """Extract speaker, timestamp, and initial text from a regex match.
+
+    Each format maps its capture groups differently.
+    """
+    if fmt == "lex":
+        speaker = match.group(1).strip()
+        timestamp = match.group(2)
+        # Text may continue after the [(HH:MM:SS)](url) on the same line
+        rest = LEX_PATTERN.sub('', line).strip()
+        rest = re.sub(r'^\([^)]*\)\s*', '', rest)
+        return {"speaker": speaker, "timestamp": timestamp, "text": rest}
+    elif fmt == "bracketed":
+        return {"speaker": match.group(2).strip(), "timestamp": match.group(1), "text": match.group(3).strip()}
+    else:  # speaker_only
+        return {"speaker": match.group(1).strip(), "timestamp": None, "text": match.group(2).strip()}
+
+
+# Parsing patterns (may differ from detection patterns for full-line extraction)
+_PARSE_PATTERNS = {
+    "lex": LEX_PATTERN,
+    "bracketed": re.compile(r'^\[(\d{1,2}:\d{2}:\d{2})\]\s+(\w[\w\s]+?):\s*(.*)'),
+    "speaker_only": re.compile(r'^([A-Z][\w]+(?:\s+[A-Z][\w]+)*)\s*:\s+(.*)'),
+}
 
 
 def _parse_structured_transcript(text: str, fmt: str) -> list:
@@ -348,66 +366,27 @@ def _parse_structured_transcript(text: str, fmt: str) -> list:
 
     Returns list of dicts: [{"speaker": str, "timestamp": str|None, "text": str}, ...]
     """
+    pattern = _PARSE_PATTERNS.get(fmt)
+    if pattern is None:
+        return []
     segments = []
+    current = None
 
-    if fmt == "lex":
-        # Lex Fridman: "Speaker Name [(HH:MM:SS)](url)\ntext" or "Speaker Name (HH:MM:SS)\ntext"
-        pattern = re.compile(r'^(\w[\w\s]+?)\s*\[?\((\d{1,2}:\d{2}:\d{2})\)\]?')
-        current = None
+    for line in text.split('\n'):
+        m = pattern.match(line)
+        if m:
+            if current:
+                segments.append(current)
+            current = _extract_segment_fields(fmt, m, line)
+        elif current is not None:
+            if line.strip():
+                current["text"] += (" " if current["text"] else "") + line.strip()
+            elif fmt == "lex" and current["text"]:
+                # Lex format preserves paragraph breaks
+                current["text"] += "\n"
+    if current:
+        segments.append(current)
 
-        for line in text.split('\n'):
-            m = pattern.match(line)
-            if m:
-                if current:
-                    segments.append(current)
-                speaker = m.group(1).strip()
-                timestamp = m.group(2)
-                # Text may continue after the [(HH:MM:SS)](url) on the same line
-                rest = pattern.sub('', line).strip()
-                # Strip the markdown link portion if present
-                rest = re.sub(r'^\([^)]*\)\s*', '', rest)
-                current = {"speaker": speaker, "timestamp": timestamp, "text": rest}
-            elif current is not None:
-                if line.strip():
-                    current["text"] += (" " if current["text"] else "") + line.strip()
-                elif current["text"]:
-                    current["text"] += "\n"
-        if current:
-            segments.append(current)
-
-    elif fmt == "bracketed":
-        pattern = re.compile(r'^\[(\d{1,2}:\d{2}:\d{2})\]\s+(\w[\w\s]+?):\s*(.*)')
-        current = None
-
-        for line in text.split('\n'):
-            m = pattern.match(line)
-            if m:
-                if current:
-                    segments.append(current)
-                current = {"speaker": m.group(2).strip(), "timestamp": m.group(1), "text": m.group(3).strip()}
-            elif current is not None:
-                if line.strip():
-                    current["text"] += " " + line.strip()
-        if current:
-            segments.append(current)
-
-    elif fmt == "speaker_only":
-        pattern = re.compile(r'^([A-Z][\w]+(?:\s+[A-Z][\w]+)*)\s*:\s+(.*)')
-        current = None
-
-        for line in text.split('\n'):
-            m = pattern.match(line)
-            if m:
-                if current:
-                    segments.append(current)
-                current = {"speaker": m.group(1).strip(), "timestamp": None, "text": m.group(2).strip()}
-            elif current is not None:
-                if line.strip():
-                    current["text"] += " " + line.strip()
-        if current:
-            segments.append(current)
-
-    # Clean up trailing whitespace in text
     for seg in segments:
         seg["text"] = seg["text"].strip()
 
@@ -493,9 +472,7 @@ def _load_chunk_checkpoint(chunks_dir: 'Path', chunk_idx: int):
 
 def _save_chunk_checkpoint(chunks_dir: 'Path', chunk_idx: int, data):
     """Save data as a checkpoint JSON file."""
-    checkpoint_path = chunks_dir / f"chunk_{chunk_idx:03d}.json"
-    with open(checkpoint_path, 'w') as f:
-        json.dump(data, f)
+    _save_json(chunks_dir / f"chunk_{chunk_idx:03d}.json", data)
 
 
 def _compute_chunk_diffs(chunk_texts: list, config: SpeechConfig) -> str:
@@ -812,18 +789,11 @@ def _wdiff_stats(text_a: str, text_b: str) -> dict:
     norm_a = _normalize_for_comparison(text_a)
     norm_b = _normalize_for_comparison(text_b)
 
-    import tempfile
     a_path = None
     b_path = None
     try:
-        a_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-        a_path = a_file.name
-        b_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-        b_path = b_file.name
-        a_file.write(norm_a)
-        b_file.write(norm_b)
-        a_file.close()
-        b_file.close()
+        a_path = _write_temp_text(norm_a)
+        b_path = _write_temp_text(norm_b)
 
         result = subprocess.run(
             ["wdiff", "-s", a_path, b_path],
@@ -833,24 +803,19 @@ def _wdiff_stats(text_a: str, text_b: str) -> dict:
         output = result.stdout + result.stderr
 
         # Parse stats lines: "/path/to/file: N words  M PP% common  ..."
+        wdiff_stat_re = re.compile(r'(\d+)\s+words\s+(\d+)\s+(\d+)%\s+common')
         stats = {}
-        for line in output.strip().split('\n'):
-            if a_path in line:
-                m = re.search(r'(\d+)\s+words\s+(\d+)\s+(\d+)%\s+common', line)
-                if m:
-                    stats['a'] = {
-                        'words': int(m.group(1)),
-                        'common': int(m.group(2)),
-                        'common_pct': int(m.group(3))
-                    }
-            elif b_path in line:
-                m = re.search(r'(\d+)\s+words\s+(\d+)\s+(\d+)%\s+common', line)
-                if m:
-                    stats['b'] = {
-                        'words': int(m.group(1)),
-                        'common': int(m.group(2)),
-                        'common_pct': int(m.group(3))
-                    }
+        for key, path in [('a', a_path), ('b', b_path)]:
+            for line in output.strip().split('\n'):
+                if path in line:
+                    m = wdiff_stat_re.search(line)
+                    if m:
+                        stats[key] = {
+                            'words': int(m.group(1)),
+                            'common': int(m.group(2)),
+                            'common_pct': int(m.group(3))
+                        }
+                    break
         return stats
     finally:
         if a_path:

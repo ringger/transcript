@@ -148,7 +148,7 @@ class TestDAGStageSkipping:
         analysis.write_text("# existing analysis")
         analyze_source_survival(config, data)
         out = capsys.readouterr().out
-        assert "analysis up to date" in out
+        assert "Reusing: analysis.md" in out
 
     def test_analysis_runs_when_merged_is_newer(self, tmp_path, capsys):
         config, data = _make_test_artefacts(tmp_path)
@@ -238,6 +238,33 @@ class TestEstimateApiCost:
         expected = costs["analyze_slides"] + costs["merge_sources"] + costs["ensemble_whisper"]
         assert costs["total"] == pytest.approx(expected)
 
+    def test_opus_costs_more_than_sonnet(self, tmp_path):
+        sonnet = SpeechConfig(url="x", output_dir=tmp_path,
+                              claude_model="claude-sonnet-4-20250514",
+                              whisper_models=["medium"])
+        opus = SpeechConfig(url="x", output_dir=tmp_path,
+                            claude_model="claude-opus-4-20250514",
+                            whisper_models=["medium"])
+        cost_s = estimate_api_cost(sonnet, transcript_words=5000)
+        cost_o = estimate_api_cost(opus, transcript_words=5000)
+        assert cost_o["merge_sources"] > cost_s["merge_sources"]
+
+    def test_haiku_costs_less_than_sonnet(self, tmp_path):
+        sonnet = SpeechConfig(url="x", output_dir=tmp_path,
+                              claude_model="claude-sonnet-4-20250514",
+                              whisper_models=["medium"])
+        haiku = SpeechConfig(url="x", output_dir=tmp_path,
+                             claude_model="claude-haiku-4-20250514",
+                             whisper_models=["medium"])
+        cost_s = estimate_api_cost(sonnet, transcript_words=5000)
+        cost_h = estimate_api_cost(haiku, transcript_words=5000)
+        assert cost_h["merge_sources"] < cost_s["merge_sources"]
+
+    def test_unknown_model_uses_default_pricing(self, tmp_path):
+        from transcriber import _get_model_pricing, DEFAULT_PRICING
+        pricing = _get_model_pricing("some-unknown-model")
+        assert pricing == DEFAULT_PRICING
+
 
 # ---------------------------------------------------------------------------
 # _load_external_transcript
@@ -318,3 +345,50 @@ class TestLoadExternalTranscript:
                               external_transcript=str(f))
         _, label = _load_external_transcript(config)
         assert label == "my_notes.txt"
+
+
+# ---------------------------------------------------------------------------
+# Dry-run end-to-end: full pipeline creates no files
+# ---------------------------------------------------------------------------
+
+class TestDryRunNoSideEffects:
+    """Verify that dry-run mode follows the main code path but creates no files."""
+
+    def test_full_pipeline_dry_run_creates_no_files(self, tmp_path, capsys):
+        """Run all pipeline stages in dry-run mode and verify no files are created."""
+        from download import download_media
+        from transcription import transcribe_audio
+        from slides import extract_slides, create_basic_slides_json
+        from unittest.mock import patch, MagicMock
+        import json
+
+        # Mock yt-dlp to avoid network calls
+        def mock_run_command(cmd, desc, verbose=False):
+            if "--dump-json" in cmd:
+                return MagicMock(stdout=json.dumps({
+                    "title": "Test", "id": "t1", "duration": 60
+                }))
+            return MagicMock(stdout="", stderr="")
+
+        config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
+                              dry_run=True, skip_existing=False)
+        data = SpeechData()
+
+        with patch("download.run_command", side_effect=mock_run_command):
+            download_media(config, data)
+
+        transcribe_audio(config, data)
+        extract_slides(config, data)
+        merge_transcript_sources(config, data)
+        generate_markdown(config, data)
+        analyze_source_survival(config, data)
+
+        # Verify no files were created
+        created_files = list(tmp_path.iterdir())
+        assert created_files == [], f"Dry-run created files: {[f.name for f in created_files]}"
+
+        # Verify all stages printed dry-run messages
+        out = capsys.readouterr().out
+        assert "[dry-run]" in out
+        assert "Would download audio" in out
+        assert "Would save metadata" in out
