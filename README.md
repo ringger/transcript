@@ -1,8 +1,12 @@
-# Speech Transcriber
+# Transcript Critic
 
 Automated pipeline for producing accurate speech transcripts from video URLs. Downloads media, transcribes with multiple Whisper models, and merges all available sources — Whisper, YouTube captions, and optional external transcripts — into a single "critical text" using LLM-based adjudication.
 
 The approach applies principles from [textual criticism](https://en.wikipedia.org/wiki/Textual_criticism): multiple independent "witnesses" to the same speech are aligned, compared, and merged by an LLM that judges each difference on its merits, without knowing which source produced which reading. This builds on earlier work applying similar techniques to OCR ([Ringger & Lund, 2014](https://scholarsarchive.byu.edu/facpub/1647/); [Lund et al., 2013](https://www.researchgate.net/publication/220861175_Error_Correction_with_In-Domain_Training_Across_Multiple_OCR_System_Outputs)), replacing trained classifiers with an LLM as the eclectic editor.
+
+## How is this different from WhisperX?
+
+[WhisperX](https://github.com/m-bain/whisperX) improves a single Whisper run with voice-activity-detection (VAD) chunking, word-level timestamps, and speaker diarization — but the transcript still comes from one model pass. Transcript Critic takes a different approach: it runs multiple Whisper models, pulls in YouTube captions and external human-edited transcripts, and treats them all as independent witnesses. An LLM then adjudicates every disagreement blindly, without knowing which source produced which reading. The result is a merged "critical text" that is more accurate than any single source. If you just need fast, well-segmented Whisper output, WhisperX is the right tool; if you want the most accurate transcript possible from multiple sources, this is.
 
 ## Features
 
@@ -22,15 +26,16 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 
 ## Installation
 
-### Dependencies
+```bash
+pip install transcript-critic
+```
+
+### System Dependencies
 
 ```bash
 # Required tools
 brew install ffmpeg wdiff    # macOS
 # apt install ffmpeg wdiff   # Ubuntu/Debian
-
-# Install Python dependencies (auto-selects mlx-whisper on Apple Silicon, openai-whisper elsewhere)
-pip install -r requirements.txt
 
 # Install Ollama for local LLM (used by default for merging/ensembling)
 brew install ollama          # macOS
@@ -40,21 +45,31 @@ brew install ollama          # macOS
 ollama pull qwen2.5
 ```
 
+### From Source
+
+```bash
+git clone https://github.com/ringger/transcript-critic.git
+cd transcript-critic
+pip install -e .          # editable install
+pip install -e .[dev]     # with test dependencies
+pip install -e .[diarize] # with speaker diarization
+```
+
 ## Quick Start
 
 ```bash
 # Basic: Whisper transcription + local LLM merge (free, uses Ollama)
-python transcriber.py "https://youtube.com/watch?v=..."
+transcript-critic "https://youtube.com/watch?v=..."
 
 # With an external human-edited transcript for three-way merge
-python transcriber.py "https://youtube.com/watch?v=..." \
+transcript-critic "https://youtube.com/watch?v=..." \
     --external-transcript "https://example.com/transcript"
 
 # Use Anthropic Claude API instead of local Ollama (higher quality, costs money)
-python transcriber.py "https://youtube.com/watch?v=..." --api
+transcript-critic "https://youtube.com/watch?v=..." --api
 
 # Whisper only — no LLM merging at all
-python transcriber.py "https://youtube.com/watch?v=..." --no-llm
+transcript-critic "https://youtube.com/watch?v=..." --no-llm
 ```
 
 ## Usage Examples
@@ -63,8 +78,8 @@ python transcriber.py "https://youtube.com/watch?v=..." --no-llm
 
 ```bash
 # Podcast episode — audio only, no video or captions
-python transcriber.py --podcast "https://www.iheart.com/podcast/.../episode/..."
-python transcriber.py --podcast "https://podcasts.apple.com/us/podcast/..."
+transcript-critic --podcast "https://www.iheart.com/podcast/.../episode/..."
+transcript-critic --podcast "https://podcasts.apple.com/us/podcast/..."
 ```
 
 ### Speaker Diarization
@@ -75,20 +90,20 @@ pip install pyannote.audio
 export HF_TOKEN="hf_..."  # HuggingFace token with pyannote model access
 
 # Auto-detect speaker names from introductions
-python transcriber.py --diarize --num-speakers 2 --podcast "https://..."
+transcript-critic --diarize --num-speakers 2 --podcast "https://..."
 
 # Manual speaker names (in order of first appearance)
-python transcriber.py --diarize --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
+transcript-critic --diarize --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
 ```
 
 ### Speech-Only (No Slides)
 
 ```bash
 # YouTube talk or interview — skip slide extraction
-python transcriber.py "https://youtube.com/watch?v=..." --no-slides
+transcript-critic "https://youtube.com/watch?v=..." --no-slides
 
 # With external transcript for higher accuracy
-python transcriber.py "https://youtube.com/watch?v=..." \
+transcript-critic "https://youtube.com/watch?v=..." \
     --no-slides \
     --external-transcript "https://example.com/transcript"
 ```
@@ -97,32 +112,32 @@ python transcriber.py "https://youtube.com/watch?v=..." \
 
 ```bash
 # Extract slides and interleave with transcript
-python transcriber.py "https://youtube.com/watch?v=..."
+transcript-critic "https://youtube.com/watch?v=..."
 
 # Also describe slide content with vision API
-python transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
+transcript-critic "https://youtube.com/watch?v=..." --analyze-slides
 ```
 
 ### Custom Options
 
 ```bash
 # Custom output directory
-python transcriber.py "https://youtube.com/watch?v=..." -o ./my_transcript
+transcript-critic "https://youtube.com/watch?v=..." -o ./my_transcript
 
 # Use specific Whisper models
-python transcriber.py "https://youtube.com/watch?v=..." --whisper-models large
+transcript-critic "https://youtube.com/watch?v=..." --whisper-models large
 
 # Use a different local model
-python transcriber.py "https://youtube.com/watch?v=..." --local-model llama3.3
+transcript-critic "https://youtube.com/watch?v=..." --local-model llama3.3
 
 # Adjust slide detection sensitivity (0.0–1.0, lower = more slides)
-python transcriber.py "https://youtube.com/watch?v=..." --scene-threshold 0.15
+transcript-critic "https://youtube.com/watch?v=..." --scene-threshold 0.15
 
 # Force re-processing (ignore existing files)
-python transcriber.py "https://youtube.com/watch?v=..." --force
+transcript-critic "https://youtube.com/watch?v=..." --force
 
 # Verbose output
-python transcriber.py "https://youtube.com/watch?v=..." -v
+transcript-critic "https://youtube.com/watch?v=..." -v
 ```
 
 ## Output Files
@@ -188,7 +203,7 @@ Unlike a traditional critical edition, the pipeline does not produce an apparatu
 
 ### Source Survival Analysis
 
-After merging, `wdiff -s` compares each source against the merged output:
+After merging, `wdiff -s` compares each source against the merged output, showing how much each source contributed to the final text. Here is an actual survival analysis from a 3-hour podcast episode transcribed with Whisper (small + medium ensembled), YouTube auto-captions, and a human-edited external transcript:
 
 ```
 Source                       Words   Common  % of Merged  % of Source
@@ -199,7 +214,18 @@ External transcript         33,122   30,245          99%          91%
 Merged output               30,524
 ```
 
-This shows how much each source contributed to the final text and which source the merged output most closely resembles.
+No single source matches the merged output — the merged text draws from all three. The external transcript is closest (99% of merged words present), but the merge still corrects ~1% of its content using the other sources. Whisper contributes readings not found in either captions or the external transcript, and vice versa.
+
+Here are specific corrections the merge made by adjudicating across sources:
+
+| Whisper | YouTube captions | External transcript | Merged (correct) |
+|---------|-----------------|--------------------|--------------------|
+| "Cloud Opus" | — | "Claude Opus" | **Claude Opus** (product name) |
+| "Ross Douthend" | "ross douthat" | "Ross Douthat" | **Ross Douthat** (person name) |
+| "GPT 5.3 codecs" | — | "GPT-5.3 Codex" | **GPT 5.3 Codex** (model name, not audio codec) |
+| "is source code" | — | "its source code" | **its source code** (grammar) |
+
+Each source alone gets some things right and others wrong. Whisper hallucinates proper nouns ("Cloud" for "Claude", "Douthend" for "Douthat"). YouTube captions lack capitalization and punctuation but sometimes have correct spellings. The external transcript has the best proper nouns but may paraphrase or omit filler words. The merge selects the best reading at each disagreement, producing a transcript more accurate than any individual source.
 
 ### Multi-Model Ensembling
 
@@ -307,8 +333,8 @@ The tool retries on timeouts (120s per attempt, up to 5 retries with exponential
 ### ffmpeg scene detection captures too few/many slides
 
 ```bash
-python transcriber.py "..." --scene-threshold 0.05  # More slides
-python transcriber.py "..." --scene-threshold 0.20  # Fewer slides
+transcript-critic "..." --scene-threshold 0.05  # More slides
+transcript-critic "..." --scene-threshold 0.20  # Fewer slides
 ```
 
 ## License

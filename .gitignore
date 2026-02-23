@@ -36,3 +36,7 @@ transcripts/
 
 # Intermediate processing files
 *_clean.txt
+
+# Build artifacts
+dist/
+build/

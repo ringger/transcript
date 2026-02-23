@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcript-critic"
+version = "0.1.0"
+description = "Multi-source speech transcription with LLM-based adjudication inspired by textual criticism"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+keywords = ["transcription", "whisper", "speech", "llm", "diarization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "yt-dlp",
+    "openai",
+    "anthropic",
+    "numpy",
+    "mlx-whisper; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "openai-whisper; platform_machine != 'arm64' or sys_platform != 'darwin'",
+]
+
+[project.optional-dependencies]
+diarize = ["pyannote.audio"]
+dev = [
+    "pytest",
+    "pyannote.audio",
+]
+
+[project.scripts]
+transcript-critic = "transcript_critic.transcriber:main"
+
+[project.urls]
+Repository = "https://github.com/ringger/transcript-critic"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

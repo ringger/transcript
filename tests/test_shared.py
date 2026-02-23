@@ -11,7 +11,7 @@ import pytest
 
 from conftest import make_openai_response
 
-from shared import (
+from transcript_critic.shared import (
     SpeechConfig,
     SpeechData,
     _NormalizedResponse,
@@ -159,7 +159,7 @@ class TestApiCallWithRetry:
         assert result == "ok"
         assert client.messages.create.call_count == 1
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_retries_on_529(self, mock_sleep, cfg):
         import anthropic
 
@@ -175,7 +175,7 @@ class TestApiCallWithRetry:
         assert client.messages.create.call_count == 3
         assert mock_sleep.call_count == 2
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_exponential_backoff(self, mock_sleep, cfg):
         import anthropic
 
@@ -190,7 +190,7 @@ class TestApiCallWithRetry:
         delays = [call.args[0] for call in mock_sleep.call_args_list]
         assert delays == [5, 10, 20]
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_raises_after_max_retries(self, mock_sleep, cfg):
         import anthropic
 
@@ -230,7 +230,7 @@ class TestApiCallWithRetryTimeout:
         return SpeechConfig(url="x", output_dir=tmp_path,
                             local=False, api_initial_backoff=1, api_max_retries=3)
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_retries_on_timeout(self, mock_sleep, cfg):
         import anthropic
 
@@ -245,7 +245,7 @@ class TestApiCallWithRetryTimeout:
         assert client.messages.create.call_count == 2
         assert mock_sleep.call_count == 1
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_raises_after_max_timeout_retries(self, mock_sleep, cfg):
         import anthropic
 
@@ -257,7 +257,7 @@ class TestApiCallWithRetryTimeout:
                                 max_tokens=100, messages=[])
         assert client.messages.create.call_count == 3
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_timeout_backoff_is_exponential(self, mock_sleep, cfg):
         import anthropic
 
@@ -502,7 +502,7 @@ class TestLlmCallWithRetryLocal:
         call_kwargs = client.chat.completions.create.call_args[1]
         assert call_kwargs["max_tokens"] == 4096
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_retries_on_timeout(self, mock_sleep, cfg):
         from openai import APITimeoutError
         client = MagicMock()
@@ -515,7 +515,7 @@ class TestLlmCallWithRetryLocal:
         assert client.chat.completions.create.call_count == 2
         assert mock_sleep.call_count == 1
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_retries_on_429(self, mock_sleep, cfg):
         from openai import APIStatusError
         client = MagicMock()
@@ -531,7 +531,7 @@ class TestLlmCallWithRetryLocal:
         assert result.content[0].text == "ok"
         assert mock_sleep.call_count == 1
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_retries_on_500(self, mock_sleep, cfg):
         from openai import APIStatusError
         client = MagicMock()
@@ -546,7 +546,7 @@ class TestLlmCallWithRetryLocal:
         result = llm_call_with_retry(client, cfg, messages=[{"role": "user", "content": "hi"}])
         assert result.content[0].text == "ok"
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_exponential_backoff_local(self, mock_sleep, cfg):
         from openai import APITimeoutError
         client = MagicMock()
@@ -558,7 +558,7 @@ class TestLlmCallWithRetryLocal:
         delays = [call.args[0] for call in mock_sleep.call_args_list]
         assert delays == [1, 2]
 
-    @patch("shared.time.sleep")
+    @patch("transcript_critic.shared.time.sleep")
     def test_raises_after_max_retries_local(self, mock_sleep, cfg):
         from openai import APITimeoutError
         client = MagicMock()
@@ -624,7 +624,7 @@ class TestDryRunSkip:
 # ---------------------------------------------------------------------------
 
 class TestRunCommand:
-    @patch("shared.subprocess.run")
+    @patch("transcript_critic.shared.subprocess.run")
     def test_success_returns_completed_process(self, mock_run):
         mock_run.return_value = subprocess.CompletedProcess(
             args=["echo", "hi"], returncode=0, stdout="hi\n", stderr=""
@@ -635,7 +635,7 @@ class TestRunCommand:
             ["echo", "hi"], capture_output=True, text=True, check=True
         )
 
-    @patch("shared.subprocess.run")
+    @patch("transcript_critic.shared.subprocess.run")
     def test_verbose_prints_command(self, mock_run, capsys):
         mock_run.return_value = subprocess.CompletedProcess(
             args=["ls"], returncode=0, stdout="", stderr=""
@@ -644,7 +644,7 @@ class TestRunCommand:
         out = capsys.readouterr().out
         assert "ls -la" in out
 
-    @patch("shared.subprocess.run")
+    @patch("transcript_critic.shared.subprocess.run")
     def test_not_verbose_no_print(self, mock_run, capsys):
         mock_run.return_value = subprocess.CompletedProcess(
             args=["ls"], returncode=0, stdout="", stderr=""
@@ -653,7 +653,7 @@ class TestRunCommand:
         out = capsys.readouterr().out
         assert "ls" not in out
 
-    @patch("shared.subprocess.run")
+    @patch("transcript_critic.shared.subprocess.run")
     def test_failure_prints_stderr_and_reraises(self, mock_run, capsys):
         mock_run.side_effect = subprocess.CalledProcessError(
             returncode=1, cmd=["bad"], stderr="something broke"
@@ -670,19 +670,19 @@ class TestRunCommand:
 # ---------------------------------------------------------------------------
 
 class TestCheckDependencies:
-    @patch("shared.shutil.which", return_value="/usr/bin/tool")
+    @patch("transcript_critic.shared.shutil.which", return_value="/usr/bin/tool")
     def test_cli_tools_found(self, mock_which):
         deps = check_dependencies()
         assert deps["yt-dlp"] is True
         assert deps["ffmpeg"] is True
 
-    @patch("shared.shutil.which", return_value=None)
+    @patch("transcript_critic.shared.shutil.which", return_value=None)
     def test_cli_tools_missing(self, mock_which):
         deps = check_dependencies()
         assert deps["yt-dlp"] is False
         assert deps["ffmpeg"] is False
 
-    @patch("shared.shutil.which", return_value=None)
+    @patch("transcript_critic.shared.shutil.which", return_value=None)
     def test_no_whisper_packages(self, mock_which):
         # Force both Whisper imports to fail
         import sys

@@ -3,9 +3,9 @@
 import json
 import time
 
-from shared import SpeechConfig, SpeechData
+from transcript_critic.shared import SpeechConfig, SpeechData
 
-from slides import (
+from transcript_critic.slides import (
     _load_slide_timestamps,
     analyze_slides_with_vision,
     create_basic_slides_json,

@@ -48,7 +48,8 @@ import re
 import sys
 from pathlib import Path
 
-from shared import (
+from transcript_critic import __version__
+from transcript_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     run_command, _print_reusing, _dry_run_skip, _should_skip,
@@ -78,14 +79,14 @@ def _get_model_pricing(model_name: str) -> dict:
     return DEFAULT_PRICING
 
 # Pipeline stage modules
-from download import download_media, clean_vtt_captions
-from transcription import transcribe_audio
-from slides import extract_slides, analyze_slides_with_vision, create_basic_slides_json
-from output import generate_markdown
-from diarization import diarize_audio
+from transcript_critic.download import download_media, clean_vtt_captions
+from transcript_critic.transcription import transcribe_audio
+from transcript_critic.slides import extract_slides, analyze_slides_with_vision, create_basic_slides_json
+from transcript_critic.output import generate_markdown
+from transcript_critic.diarization import diarize_audio
 
 # Merge logic
-from merge import (
+from transcript_critic.merge import (
     _extract_text_from_html,
     _normalize_for_comparison,
     _detect_transcript_structure,
@@ -487,6 +488,7 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
+        prog="transcript-critic",
         description="Transcribe speeches from video URLs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -500,6 +502,8 @@ Examples:
   %(prog)s --podcast "https://www.iheart.com/podcast/.../episode/..."
         """
     )
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}")
 
     # Input
     input_group = parser.add_argument_group("input")

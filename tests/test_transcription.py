@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from shared import SpeechConfig, SpeechData
+from transcript_critic.shared import SpeechConfig, SpeechData
 
-from transcription import (
+from transcript_critic.transcription import (
     _ensemble_whisper_transcripts,
     _load_transcript_segments,
     _resolve_whisper_chunk,
@@ -97,8 +97,8 @@ class TestLoadTranscriptSegments:
 class TestResolveWhisperChunk:
     """Test _resolve_whisper_chunk with mocked LLM."""
 
-    @patch("transcription.create_llm_client")
-    @patch("transcription.llm_call_with_retry")
+    @patch("transcript_critic.transcription.create_llm_client")
+    @patch("transcript_critic.transcription.llm_call_with_retry")
     def test_basic_resolution(self, mock_llm, mock_client, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path)
         base_text = "Hello world"
@@ -114,8 +114,8 @@ class TestResolveWhisperChunk:
         assert result == "Hello world"
         mock_llm.assert_called_once()
 
-    @patch("transcription.create_llm_client")
-    @patch("transcription.llm_call_with_retry")
+    @patch("transcript_critic.transcription.create_llm_client")
+    @patch("transcript_critic.transcription.llm_call_with_retry")
     def test_prompt_contains_base_and_diffs(self, mock_llm, mock_client, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path)
         base_text = "The quick brown fox"
@@ -137,8 +137,8 @@ class TestResolveWhisperChunk:
         assert "SMALL MODEL" in prompt
         assert diff_summary in prompt
 
-    @patch("transcription.create_llm_client")
-    @patch("transcription.llm_call_with_retry")
+    @patch("transcript_critic.transcription.create_llm_client")
+    @patch("transcript_critic.transcription.llm_call_with_retry")
     def test_strips_whitespace(self, mock_llm, mock_client, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path)
         mock_resp = MagicMock()
@@ -157,7 +157,7 @@ class TestResolveWhisperChunk:
 class TestResolveWhisperDifferences:
     """Test _resolve_whisper_differences chunking and diff formatting."""
 
-    @patch("transcription._resolve_whisper_chunk")
+    @patch("transcript_critic.transcription._resolve_whisper_chunk")
     def test_short_text_single_chunk(self, mock_chunk, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=500)
         base_text = "short text here"
@@ -170,7 +170,7 @@ class TestResolveWhisperDifferences:
         assert result == "short text here"
         mock_chunk.assert_called_once()
 
-    @patch("transcription._resolve_whisper_chunk")
+    @patch("transcript_critic.transcription._resolve_whisper_chunk")
     def test_long_text_multiple_chunks(self, mock_chunk, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=10)
         base_text = "word " * 25  # 25 words, should split into 3 chunks
@@ -182,7 +182,7 @@ class TestResolveWhisperDifferences:
         assert mock_chunk.call_count == 3
         assert "chunk result" in result
 
-    @patch("transcription._resolve_whisper_chunk")
+    @patch("transcript_critic.transcription._resolve_whisper_chunk")
     def test_diff_summary_formatting(self, mock_chunk, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=500)
         diffs = [
@@ -256,8 +256,8 @@ class TestEnsembleWhisperTranscripts:
         assert "medium" in ensembled
         assert "--no-llm" in out
 
-    @patch("transcription._resolve_whisper_differences")
-    @patch("transcription._analyze_differences_wdiff")
+    @patch("transcript_critic.transcription._resolve_whisper_differences")
+    @patch("transcript_critic.transcription._analyze_differences_wdiff")
     def test_calls_resolve_when_diffs_found(self, mock_analyze, mock_resolve, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
         data = self._make_whisper_data(tmp_path)
@@ -268,7 +268,7 @@ class TestEnsembleWhisperTranscripts:
         mock_resolve.assert_called_once()
         assert (tmp_path / "ensembled.txt").read_text() == "resolved text"
 
-    @patch("transcription._analyze_differences_wdiff")
+    @patch("transcript_critic.transcription._analyze_differences_wdiff")
     def test_no_diffs_uses_base(self, mock_analyze, tmp_path, capsys):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
         data = self._make_whisper_data(tmp_path)
@@ -330,7 +330,7 @@ class TestRunWhisperModel:
         out = capsys.readouterr().out
         assert "[dry-run]" in out
 
-    @patch("transcription.run_command")
+    @patch("transcript_critic.transcription.run_command")
     def test_mlx_whisper_runs_and_renames(self, mock_run, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
         data = SpeechData(audio_path=tmp_path / "audio.mp3")
@@ -350,7 +350,7 @@ class TestRunWhisperModel:
         assert (tmp_path / "small.json").exists()
         assert data.whisper_transcripts["small"]["txt"] == tmp_path / "small.txt"
 
-    @patch("transcription.run_command")
+    @patch("transcript_critic.transcription.run_command")
     def test_mlx_whisper_unlinks_existing_before_rename(self, mock_run, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
         data = SpeechData(audio_path=tmp_path / "audio.mp3")
@@ -390,7 +390,7 @@ class TestRunWhisperModel:
         assert (tmp_path / "medium.json").exists()
         assert data.whisper_transcripts["medium"]["txt"] == tmp_path / "medium.txt"
 
-    @patch("transcription.run_command")
+    @patch("transcript_critic.transcription.run_command")
     def test_stores_none_when_files_missing(self, mock_run, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
         data = SpeechData(audio_path=tmp_path / "audio.mp3")
@@ -420,7 +420,7 @@ class TestTranscribeAudio:
         with pytest.raises(FileNotFoundError):
             transcribe_audio(config, data)
 
-    @patch("transcription.check_dependencies",
+    @patch("transcript_critic.transcription.check_dependencies",
            return_value={"mlx_whisper": False, "whisper": False})
     def test_raises_without_whisper(self, mock_deps, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path)
@@ -430,9 +430,9 @@ class TestTranscribeAudio:
         with pytest.raises(RuntimeError, match="No Whisper"):
             transcribe_audio(config, data)
 
-    @patch("transcription._load_transcript_segments")
-    @patch("transcription._run_whisper_model")
-    @patch("transcription.check_dependencies",
+    @patch("transcript_critic.transcription._load_transcript_segments")
+    @patch("transcript_critic.transcription._run_whisper_model")
+    @patch("transcript_critic.transcription.check_dependencies",
            return_value={"mlx_whisper": True, "whisper": False})
     def test_single_model_uses_directly(self, mock_deps, mock_run, mock_load, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, whisper_models=["medium"])
@@ -450,10 +450,10 @@ class TestTranscribeAudio:
         assert data.transcript_path == txt
         mock_run.assert_called_once()
 
-    @patch("transcription._load_transcript_segments")
-    @patch("transcription._ensemble_whisper_transcripts")
-    @patch("transcription._run_whisper_model")
-    @patch("transcription.check_dependencies",
+    @patch("transcript_critic.transcription._load_transcript_segments")
+    @patch("transcript_critic.transcription._ensemble_whisper_transcripts")
+    @patch("transcript_critic.transcription._run_whisper_model")
+    @patch("transcript_critic.transcription.check_dependencies",
            return_value={"mlx_whisper": True, "whisper": False})
     def test_multiple_models_calls_ensemble(self, mock_deps, mock_run, mock_ensemble,
                                              mock_load, tmp_path):
@@ -478,9 +478,9 @@ class TestTranscribeAudio:
         assert mock_run.call_count == 2
         mock_ensemble.assert_called_once()
 
-    @patch("transcription._load_transcript_segments")
-    @patch("transcription._run_whisper_model")
-    @patch("transcription.check_dependencies",
+    @patch("transcript_critic.transcription._load_transcript_segments")
+    @patch("transcript_critic.transcription._run_whisper_model")
+    @patch("transcript_critic.transcription.check_dependencies",
            return_value={"mlx_whisper": True, "whisper": False})
     def test_raises_if_no_transcript_after_run(self, mock_deps, mock_run,
                                                 mock_load, tmp_path):

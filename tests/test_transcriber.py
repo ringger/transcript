@@ -6,11 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from shared import SpeechConfig, SpeechData, is_up_to_date
-from merge import _format_structured_segments
-from download import clean_vtt_captions
-from output import generate_markdown
-from transcriber import (
+from transcript_critic.shared import SpeechConfig, SpeechData, is_up_to_date
+from transcript_critic.merge import _format_structured_segments
+from transcript_critic.download import clean_vtt_captions
+from transcript_critic.output import generate_markdown
+from transcript_critic.transcriber import (
     _load_external_transcript,
     _slugify_title,
     _strip_structured_headers,
@@ -284,7 +284,7 @@ class TestEstimateApiCost:
         assert cost_h["merge_sources"] < cost_s["merge_sources"]
 
     def test_unknown_model_uses_default_pricing(self, tmp_path):
-        from transcriber import _get_model_pricing, DEFAULT_PRICING
+        from transcript_critic.transcriber import _get_model_pricing, DEFAULT_PRICING
         pricing = _get_model_pricing("some-unknown-model")
         assert pricing == DEFAULT_PRICING
 
@@ -324,7 +324,7 @@ class TestLoadExternalTranscript:
         assert text == "Plain transcript text"
         assert label == "transcript.txt"
 
-    @patch("transcriber._extract_text_from_html", return_value="Extracted text")
+    @patch("transcript_critic.transcriber._extract_text_from_html", return_value="Extracted text")
     @patch("urllib.request.urlopen")
     def test_url_html_calls_extract(self, mock_urlopen, mock_extract, tmp_path):
         mock_response = MagicMock()
@@ -379,9 +379,9 @@ class TestDryRunNoSideEffects:
 
     def test_full_pipeline_dry_run_creates_no_files(self, tmp_path, capsys):
         """Run all pipeline stages in dry-run mode and verify no files are created."""
-        from download import download_media
-        from transcription import transcribe_audio
-        from slides import extract_slides, create_basic_slides_json
+        from transcript_critic.download import download_media
+        from transcript_critic.transcription import transcribe_audio
+        from transcript_critic.slides import extract_slides, create_basic_slides_json
         from unittest.mock import patch, MagicMock
         import json
 
@@ -397,7 +397,7 @@ class TestDryRunNoSideEffects:
                               dry_run=True, skip_existing=False)
         data = SpeechData()
 
-        with patch("download.run_command", side_effect=mock_run_command):
+        with patch("transcript_critic.download.run_command", side_effect=mock_run_command):
             download_media(config, data)
 
         transcribe_audio(config, data)
@@ -479,7 +479,7 @@ class TestDiarizedSkeletonRouting:
         content = data.merged_transcript_path.read_text()
         assert "[0:00:00] Alice:" in content
 
-    @patch("transcriber._merge_structured")
+    @patch("transcript_critic.transcriber._merge_structured")
     def test_diarized_with_captions_calls_structured_merge(self, mock_merge, tmp_path, capsys):
         """Diarized skeleton + Whisper + captions → structured merge with 'Diarized Transcript'."""
         config, data = self._make_diarized_artefacts(tmp_path, has_captions=True)
@@ -495,7 +495,7 @@ class TestDiarizedSkeletonRouting:
         call_kwargs = mock_merge.call_args
         assert call_kwargs[1]["skeleton_source_name"] == "Diarized Transcript"
 
-    @patch("transcriber._merge_structured")
+    @patch("transcript_critic.transcriber._merge_structured")
     def test_external_takes_priority_over_diarized(self, mock_merge, tmp_path, capsys):
         """External transcript provides skeleton even when diarized exists."""
         config, data = self._make_diarized_artefacts(tmp_path, has_external=True)

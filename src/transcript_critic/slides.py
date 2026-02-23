@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from shared import (
+from transcript_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     create_llm_client, llm_call_with_retry,

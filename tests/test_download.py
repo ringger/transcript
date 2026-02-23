@@ -4,9 +4,9 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from shared import SpeechConfig, SpeechData
+from transcript_critic.shared import SpeechConfig, SpeechData
 
-from download import clean_vtt_captions, download_media
+from transcript_critic.download import clean_vtt_captions, download_media
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def _mock_run_command_for_download(cmd, desc, verbose=False):
 
 
 class TestDownloadMedia:
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_downloads_audio_video_captions(self, mock_run, tmp_path):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
                               skip_existing=False)
@@ -89,7 +89,7 @@ class TestDownloadMedia:
         # Should have called run_command for: info, audio, video, captions
         assert mock_run.call_count == 4
 
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_reuses_existing_audio(self, mock_run, tmp_path):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
                               skip_existing=True)
@@ -101,7 +101,7 @@ class TestDownloadMedia:
         audio_calls = [c for c in mock_run.call_args_list if "-x" in c[0][0]]
         assert len(audio_calls) == 0
 
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_no_slides_skips_video(self, mock_run, tmp_path, capsys):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
                               no_slides=True, skip_existing=False)
@@ -111,7 +111,7 @@ class TestDownloadMedia:
         assert "Skipping video download" in out
         assert data.video_path is None
 
-    @patch("download.run_command")
+    @patch("transcript_critic.download.run_command")
     def test_captions_failure_is_graceful(self, mock_run, tmp_path):
         def side_effect(cmd, desc, verbose=False):
             if "--dump-json" in cmd:
@@ -127,7 +127,7 @@ class TestDownloadMedia:
         download_media(config, data)
         assert data.captions_path is None
 
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_dry_run_skips_downloads(self, mock_run, tmp_path, capsys):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
                               dry_run=True, skip_existing=False)
@@ -140,7 +140,7 @@ class TestDownloadMedia:
         # Dry-run should not create any files
         assert not (tmp_path / "metadata.json").exists()
 
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_saves_metadata(self, mock_run, tmp_path):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
                               skip_existing=False)
@@ -153,7 +153,7 @@ class TestDownloadMedia:
         assert metadata["url"] == "https://example.com/v"
         assert metadata["video_id"] == "abc123"
 
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_external_transcript_in_metadata(self, mock_run, tmp_path):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
                               skip_existing=False,
@@ -163,7 +163,7 @@ class TestDownloadMedia:
         metadata = json.loads((tmp_path / "metadata.json").read_text())
         assert metadata["external_transcript"] == "https://example.com/transcript.txt"
 
-    @patch("download.run_command", side_effect=_mock_run_command_for_download)
+    @patch("transcript_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_podcast_skips_video_and_captions(self, mock_run, tmp_path, capsys):
         config = SpeechConfig(url="https://example.com/podcast/ep1", output_dir=tmp_path,
                               podcast=True, no_slides=True, skip_existing=False)

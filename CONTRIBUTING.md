@@ -6,7 +6,7 @@ Thanks for your interest in contributing!
 
 1. Fork the repo and clone your fork
 2. Install external tools: `brew install ffmpeg wdiff ollama` (macOS) or `apt install ffmpeg wdiff` + [Ollama](https://ollama.com/) (Ubuntu/Debian)
-3. Install Python dependencies: `pip install -r requirements.txt` (auto-selects the right Whisper for your platform)
+3. Install in editable mode with dev dependencies: `pip install -e .[dev]`
 4. Run tests: `pytest -v`
 
 ## Making Changes
@@ -18,6 +18,8 @@ Thanks for your interest in contributing!
 
 ## Code Organization
 
+Source code lives in `src/transcript_critic/`:
+
 - `shared.py` — Shared types (`SpeechConfig`, `SpeechData`) and utilities
 - `transcriber.py` — Pipeline orchestration, CLI, cost estimation, source survival analysis
 - `download.py` — Media downloading (yt-dlp)
@@ -27,7 +29,7 @@ Thanks for your interest in contributing!
 - `slides.py` — Slide extraction and vision analysis
 - `output.py` — Markdown generation
 
-Tests are organized by module: `test_shared.py`, `test_transcriber.py`, `test_transcription.py`, `test_download.py`, `test_merge.py`, `test_output.py`, `test_slides.py`, `test_diarization.py`.
+Tests are in `tests/`, organized by module: `test_shared.py`, `test_transcriber.py`, `test_transcription.py`, `test_download.py`, `test_merge.py`, `test_output.py`, `test_slides.py`, `test_diarization.py`.
 
 ## Reporting Issues
 

@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 
-from shared import (
+from transcript_critic.shared import (
     tprint as print,
     SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date, _save_json,
 )

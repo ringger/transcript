@@ -1,7 +1,1 @@
-yt-dlp
-openai
-anthropic
-mlx-whisper; platform_machine == "arm64" and sys_platform == "darwin"
-openai-whisper; platform_machine != "arm64" or sys_platform != "darwin"
-# Optional: speaker diarization (requires HF_TOKEN env var)
-# pyannote.audio
+-e .[dev]
