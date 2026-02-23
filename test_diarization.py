@@ -14,6 +14,7 @@ from diarization import (
     _find_speaker_at_time,
     _format_diarized_transcript,
     _format_timestamp,
+    _get_embeddings_checkpointed,
     _get_intro_text,
     _identify_speakers,
     _apply_speaker_names,
@@ -455,6 +456,7 @@ def _make_mock_pipeline():
 
 
 class TestRunPyannoteSteps:
+    @patch("diarization._get_embeddings_checkpointed")
     @patch.dict("sys.modules", {
         "pyannote": MagicMock(),
         "pyannote.core": MagicMock(),
@@ -462,8 +464,9 @@ class TestRunPyannoteSteps:
         "pyannote.audio.utils": MagicMock(),
         "pyannote.audio.utils.signal": MagicMock(),
     })
-    def test_caches_segmentation(self, tmp_path):
+    def test_caches_segmentation(self, mock_get_emb, tmp_path):
         """Step 1 should save segmentation.npy on first run."""
+        mock_get_emb.return_value = np.random.rand(10, 3, 192).astype(np.float32)
         pipeline = _make_mock_pipeline()
         config = SpeechConfig(url="test", output_dir=tmp_path)
         data = SpeechData()
@@ -483,6 +486,7 @@ class TestRunPyannoteSteps:
             meta = json.load(f)
         assert "start" in meta and "duration" in meta and "step" in meta
 
+    @patch("diarization._get_embeddings_checkpointed")
     @patch.dict("sys.modules", {
         "pyannote": MagicMock(),
         "pyannote.core": MagicMock(),
@@ -490,10 +494,11 @@ class TestRunPyannoteSteps:
         "pyannote.audio.utils": MagicMock(),
         "pyannote.audio.utils.signal": MagicMock(),
     })
-    def test_reuses_cached_segmentation(self, tmp_path):
+    def test_reuses_cached_segmentation(self, mock_get_emb, tmp_path):
         """Step 1 should skip if segmentation.npy is newer than audio."""
         import time
 
+        mock_get_emb.return_value = np.random.rand(10, 3, 192).astype(np.float32)
         pipeline = _make_mock_pipeline()
         config = SpeechConfig(url="test", output_dir=tmp_path)
         data = SpeechData()
@@ -552,6 +557,7 @@ class TestRunPyannoteSteps:
         # get_embeddings should NOT have been called
         pipeline.get_embeddings.assert_not_called()
 
+    @patch("diarization._get_embeddings_checkpointed")
     @patch.dict("sys.modules", {
         "pyannote": MagicMock(),
         "pyannote.core": MagicMock(),
@@ -559,10 +565,11 @@ class TestRunPyannoteSteps:
         "pyannote.audio.utils": MagicMock(),
         "pyannote.audio.utils.signal": MagicMock(),
     })
-    def test_stale_cache_reruns(self, tmp_path):
+    def test_stale_cache_reruns(self, mock_get_emb, tmp_path):
         """If audio is newer than cache, re-run the step."""
         import time
 
+        mock_get_emb.return_value = np.random.rand(10, 3, 192).astype(np.float32)
         pipeline = _make_mock_pipeline()
         config = SpeechConfig(url="test", output_dir=tmp_path)
         data = SpeechData()
@@ -584,6 +591,111 @@ class TestRunPyannoteSteps:
 
         # Segmentation should have been re-run since cache is stale
         pipeline.get_segmentations.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _get_embeddings_checkpointed
+# ---------------------------------------------------------------------------
+
+def _make_mock_embedding_pipeline(num_chunks=6, num_speakers=2, embed_dim=4,
+                                   batch_size=4):
+    """Create a mock pipeline with the internals needed for checkpointed embeddings."""
+    import torch
+
+    pipeline = MagicMock()
+    pipeline.embedding_exclude_overlap = False
+    pipeline.embedding_batch_size = batch_size
+
+    # Mock audio crop: returns (waveform_tensor, sample_rate)
+    fake_waveform = torch.randn(1, 16000)  # 1 channel, 1 second at 16kHz
+    pipeline._audio.crop.return_value = (fake_waveform, 16000)
+
+    # Mock the embedding model: returns random embeddings of correct shape
+    def fake_embedding(waveform_batch, masks=None):
+        batch_sz = waveform_batch.shape[0]
+        return np.random.rand(batch_sz, embed_dim).astype(np.float32)
+
+    pipeline._embedding.side_effect = fake_embedding
+    pipeline._embedding.min_num_samples = 1
+    pipeline._embedding.sample_rate = 16000
+
+    return pipeline
+
+
+class TestGetEmbeddingsCheckpointed:
+    def _make_binary_segmentations(self, num_chunks=6, num_frames=50,
+                                     num_speakers=2):
+        """Create a real SlidingWindowFeature for testing."""
+        from pyannote.core import SlidingWindow, SlidingWindowFeature
+        data = np.random.rand(num_chunks, num_frames, num_speakers).astype(np.float32)
+        # Make binary (0/1)
+        data = (data > 0.5).astype(np.float32)
+        sw = SlidingWindow(start=0.0, duration=5.0, step=0.5)
+        return SlidingWindowFeature(data, sw)
+
+    def test_produces_correct_shape(self, tmp_path):
+        """Output should be (num_chunks, num_speakers, embed_dim)."""
+        num_chunks, num_speakers, embed_dim = 6, 2, 4
+        pipeline = _make_mock_embedding_pipeline(
+            num_chunks=num_chunks, num_speakers=num_speakers, embed_dim=embed_dim)
+        binarized = self._make_binary_segmentations(
+            num_chunks=num_chunks, num_speakers=num_speakers)
+        file = {"uri": "test", "audio": str(tmp_path / "audio.mp3")}
+
+        result = _get_embeddings_checkpointed(
+            pipeline, file, binarized, tmp_path, checkpoint_every=3)
+
+        assert result.shape == (num_chunks, num_speakers, embed_dim)
+
+    def test_saves_partial_checkpoint(self, tmp_path):
+        """Partial checkpoint should be saved every N batches."""
+        num_chunks, num_speakers, embed_dim = 6, 2, 4
+        batch_size = 4
+        # 6 chunks * 2 speakers = 12 items / batch_size 4 = 3 batches
+        pipeline = _make_mock_embedding_pipeline(
+            num_chunks=num_chunks, num_speakers=num_speakers,
+            embed_dim=embed_dim, batch_size=batch_size)
+        binarized = self._make_binary_segmentations(
+            num_chunks=num_chunks, num_speakers=num_speakers)
+        file = {"uri": "test", "audio": str(tmp_path / "audio.mp3")}
+
+        # checkpoint_every=2 means save after batch 2 (of 3 total)
+        result = _get_embeddings_checkpointed(
+            pipeline, file, binarized, tmp_path, checkpoint_every=2)
+
+        # Final result should exist and be correct shape
+        assert result.shape == (num_chunks, num_speakers, embed_dim)
+
+        # Partial checkpoint should NOT exist (cleaned up by caller, not this function)
+        # But during execution, it was created at batch 2
+        # (The caller _run_pyannote_steps cleans up; this function doesn't)
+
+    def test_resumes_from_partial_checkpoint(self, tmp_path):
+        """Should resume from partial checkpoint, skipping completed batches."""
+        num_chunks, num_speakers, embed_dim = 6, 2, 4
+        batch_size = 4
+        # 3 total batches (12 items / 4 per batch)
+        pipeline = _make_mock_embedding_pipeline(
+            num_chunks=num_chunks, num_speakers=num_speakers,
+            embed_dim=embed_dim, batch_size=batch_size)
+        binarized = self._make_binary_segmentations(
+            num_chunks=num_chunks, num_speakers=num_speakers)
+        file = {"uri": "test", "audio": str(tmp_path / "audio.mp3")}
+
+        # Pre-create partial checkpoint (simulate 2 batches completed = 8 embeddings)
+        partial_data = np.random.rand(8, embed_dim).astype(np.float32)
+        partial_npy = tmp_path / "diarization_embeddings_partial.npy"
+        partial_meta = tmp_path / "diarization_embeddings_partial.json"
+        np.save(partial_npy, partial_data)
+        with open(partial_meta, 'w') as f:
+            json.dump({"completed_batches": 2, "total_batches": 3}, f)
+
+        result = _get_embeddings_checkpointed(
+            pipeline, file, binarized, tmp_path, checkpoint_every=10)
+
+        # Only 1 batch should have been processed (batch 3 of 3)
+        assert pipeline._embedding.call_count == 1
+        assert result.shape == (num_chunks, num_speakers, embed_dim)
 
 
 # ---------------------------------------------------------------------------

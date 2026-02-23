@@ -83,9 +83,9 @@ def _make_progress_hook():
         total = kwargs.get("total", None)
         if completed is not None and total and total > 0:
             pct = int(100 * completed / total)
-            print(f"\r  {step_name}: {pct}% ({completed}/{total})", end="")
+            print(f"  {step_name}: {pct}% ({completed}/{total})")
             if completed >= total:
-                print(f"\r  {step_name}: done" + " " * 20)
+                print(f"  {step_name}: done")
         elif step_name != last_step[0]:
             last_step[0] = step_name
 
@@ -156,6 +156,120 @@ def _run_pyannote(config: SpeechConfig, data: SpeechData,
     print(f"  Found {len(speaker_segments)} speaker segments")
 
     return speaker_segments
+
+
+def _get_embeddings_checkpointed(pipeline, file, binary_segmentations,
+                                  output_dir, checkpoint_every=10):
+    """Extract embeddings with periodic checkpointing.
+
+    Replicates pyannote's get_embeddings loop but saves partial results
+    every `checkpoint_every` batches. On resume, completed batches are
+    skipped by loading from the partial checkpoint.
+
+    Returns embeddings array of shape (num_chunks, num_speakers, dimension).
+    """
+    import itertools
+    import math
+    import torch
+    from einops import rearrange
+
+    def _batchify(iterable, batch_size=32, fillvalue=None):
+        """Group iterable into fixed-size batches (mirrors pyannote's batchify)."""
+        args = [iter(iterable)] * batch_size
+        return itertools.zip_longest(*args, fillvalue=fillvalue)
+
+    partial_npy = output_dir / "diarization_embeddings_partial.npy"
+    partial_meta = output_dir / "diarization_embeddings_partial.json"
+
+    exclude_overlap = pipeline.embedding_exclude_overlap
+    duration = binary_segmentations.sliding_window.duration
+    num_chunks, num_frames, num_speakers = binary_segmentations.data.shape
+
+    # Prepare clean segmentations (same logic as pyannote's get_embeddings)
+    if exclude_overlap:
+        min_num_samples = pipeline._embedding.min_num_samples
+        num_samples = duration * pipeline._embedding.sample_rate
+        min_num_frames = math.ceil(num_frames * min_num_samples / num_samples)
+
+        clean_frames = 1.0 * (
+            np.sum(binary_segmentations.data, axis=2, keepdims=True) < 2
+        )
+        from pyannote.core import SlidingWindowFeature
+        clean_segmentations = SlidingWindowFeature(
+            binary_segmentations.data * clean_frames,
+            binary_segmentations.sliding_window,
+        )
+    else:
+        min_num_frames = -1
+        from pyannote.core import SlidingWindowFeature
+        clean_segmentations = SlidingWindowFeature(
+            binary_segmentations.data, binary_segmentations.sliding_window
+        )
+
+    def iter_waveform_and_mask():
+        for (chunk, masks), (_, clean_masks) in zip(
+            binary_segmentations, clean_segmentations
+        ):
+            waveform, _ = pipeline._audio.crop(file, chunk, mode="pad")
+            masks = np.nan_to_num(masks, nan=0.0).astype(np.float32)
+            clean_masks = np.nan_to_num(clean_masks, nan=0.0).astype(np.float32)
+            for mask, clean_mask in zip(masks.T, clean_masks.T):
+                if np.sum(clean_mask) > min_num_frames:
+                    used_mask = clean_mask
+                else:
+                    used_mask = mask
+                yield waveform[None], torch.from_numpy(used_mask)[None]
+
+    batch_size = pipeline.embedding_batch_size
+    batches = _batchify(
+        iter_waveform_and_mask(),
+        batch_size=batch_size,
+        fillvalue=(None, None),
+    )
+    batch_count = math.ceil(num_chunks * num_speakers / batch_size)
+
+    # Check for partial checkpoint
+    completed_batches = 0
+    embedding_batches = []
+    if partial_npy.exists() and partial_meta.exists():
+        with open(partial_meta, 'r') as f:
+            meta = json.load(f)
+        completed_batches = meta.get("completed_batches", 0)
+        if completed_batches > 0:
+            partial_data = np.load(partial_npy)
+            embedding_batches = list(partial_data)
+            print(f"  Resuming embeddings from batch {completed_batches}/{batch_count}")
+
+    # Skip already-completed batches (advances the generator past audio crops
+    # for those batches — cheap compared to embedding model inference)
+    for _ in range(completed_batches):
+        next(batches, None)
+
+    print(f"  Embeddings: {batch_count} batches, checkpointing every {checkpoint_every}")
+
+    for i, batch in enumerate(batches, completed_batches + 1):
+        waveforms, masks = zip(*filter(lambda b: b[0] is not None, batch))
+        waveform_batch = torch.vstack(waveforms)
+        mask_batch = torch.vstack(masks)
+
+        embedding_batch = pipeline._embedding(waveform_batch, masks=mask_batch)
+        embedding_batches.append(embedding_batch)
+
+        pct = int(100 * i / batch_count)
+        if i >= batch_count:
+            print(f"  embeddings: done")
+        else:
+            print(f"  embeddings: {pct}% ({i}/{batch_count})")
+
+        # Periodic checkpoint
+        if i % checkpoint_every == 0 and i < batch_count:
+            stacked = np.vstack(embedding_batches)
+            np.save(partial_npy, stacked)
+            _save_json(partial_meta, {"completed_batches": i, "total_batches": batch_count})
+
+    all_embeddings = np.vstack(embedding_batches)
+    embeddings = rearrange(all_embeddings, "(c s) d -> c s d", c=num_chunks)
+    return embeddings
 
 
 def _run_pyannote_steps(config, data, pipeline):
@@ -230,12 +344,17 @@ def _run_pyannote_steps(config, data, pipeline):
         embeddings = np.load(emb_npy)
     else:
         print("  Step 4/6: Extracting embeddings...")
-        embeddings = pipeline.get_embeddings(
-            file, binarized,
-            exclude_overlap=pipeline.embedding_exclude_overlap,
-            hook=hook,
+        embeddings = _get_embeddings_checkpointed(
+            pipeline, file, binarized, config.output_dir,
+            checkpoint_every=10,
         )
         np.save(emb_npy, embeddings)
+        # Clean up partial checkpoint now that final is saved
+        partial_npy = config.output_dir / "diarization_embeddings_partial.npy"
+        partial_meta = config.output_dir / "diarization_embeddings_partial.json"
+        for p in (partial_npy, partial_meta):
+            if p.exists():
+                p.unlink()
         print(f"  Embeddings cached ({emb_npy.name})")
 
     # --- Step 5: Clustering (cheap) ---
