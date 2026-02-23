@@ -174,7 +174,7 @@ Optional stages are skipped based on flags. Stage numbers are fixed regardless o
 
 ### Critical Text Merging
 
-The core innovation is treating transcript merging as textual criticism. Given 2–3+ independent "witnesses" to the same speech:
+The core idea — inspired by textual criticism — is to treat multiple transcripts as independent witnesses to the same speech and adjudicate their differences. Given 2–3+ sources:
 
 1. **Align** all sources against an anchor text using `wdiff` (longest common subsequence), producing word-position maps that keep chunks synchronized even when sources differ in length
 2. **Chunk** the aligned sources into ~500-word segments
@@ -183,6 +183,8 @@ The core innovation is treating transcript merging as textual criticism. Given 2
 5. **Reassemble** the merged chunks, restoring speaker labels and timestamps from the structured source (if available)
 
 When an external transcript has structure (speaker labels, timestamps), the merge preserves that skeleton while improving the text content from all sources.
+
+Unlike a traditional critical edition, the pipeline does not produce an apparatus of variants, construct a stemma of source relationships, or preserve editorial rationale for each decision. The goal is a single best-reading transcript, not a scholarly edition.
 
 ### Source Survival Analysis
 
@@ -206,6 +208,8 @@ When using multiple Whisper models (default: `small,medium`):
 1. Runs each model independently
 2. Uses `wdiff` to identify differences (normalized: no caps, no punctuation)
 3. Claude resolves disagreements, preferring real words over transcription errors and proper nouns over generic alternatives
+
+Ensembling is part of the same witness-and-adjudicate process as the critical text merge — multiple Whisper models are simply additional witnesses alongside captions and external transcripts. The implementation runs Whisper-vs-Whisper adjudication first to produce a single ensembled witness, but the principle is the same throughout.
 
 ### Speaker Diarization
 
@@ -254,7 +258,7 @@ ESTIMATED API COSTS
 
 ## Background
 
-This tool applies the principles of [textual criticism](https://en.wikipedia.org/wiki/Textual_criticism) — the scholarly discipline of comparing multiple manuscript witnesses to reconstruct an authoritative text — to the problem of speech transcription.
+This tool is inspired by [textual criticism](https://en.wikipedia.org/wiki/Textual_criticism) — the scholarly discipline of comparing multiple manuscript witnesses to reconstruct an authoritative text — applying its core principles (independent witnesses, alignment, adjudication) to speech transcription.
 
 The approach has roots in earlier work applying noisy-channel models and multi-source correction to speech and OCR:
 
