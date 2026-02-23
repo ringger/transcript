@@ -223,6 +223,36 @@ class TestIdentifySpeakers:
         assert data.transcript_segments[0]["speaker"] == "Alice"
         assert data.transcript_segments[1]["speaker"] == "Bob"
 
+    @patch("diarization.llm_call_with_retry")
+    @patch("diarization.create_llm_client")
+    def test_llm_uses_metadata_for_spelling(self, mock_client, mock_llm):
+        """Metadata (title, description) should be included in LLM prompt."""
+        mock_llm.return_value = MagicMock(
+            content=[MagicMock(text='{"SPEAKER_00": "Ross Douthat", "SPEAKER_01": "Dario Amodei"}')],
+        )
+        config = SpeechConfig(url="test", output_dir="/tmp", local=False)
+        data = SpeechData()
+        data.metadata = {
+            "title": "Interview with Dario Amodei",
+            "description": "Ross Douthat interviews Dario Amodei",
+            "channel": "New York Times",
+        }
+        data.transcript_segments = [
+            {"start": 0, "end": 5, "text": "Welcome Dario Amadei", "speaker": "SPEAKER_00"},
+            {"start": 5, "end": 10, "text": "Thanks Ross Douthit", "speaker": "SPEAKER_01"},
+        ]
+        _identify_speakers(config, data)
+        # Verify the LLM was called with metadata in the prompt
+        call_kwargs = mock_llm.call_args
+        prompt_text = call_kwargs[1]["messages"][0]["content"]
+        assert "METADATA" in prompt_text
+        assert "Interview with Dario Amodei" in prompt_text
+        assert "Ross Douthat" in prompt_text
+        assert "New York Times" in prompt_text
+        # Verify names were applied
+        assert data.transcript_segments[0]["speaker"] == "Ross Douthat"
+        assert data.transcript_segments[1]["speaker"] == "Dario Amodei"
+
     def test_no_speakers_is_noop(self):
         config = SpeechConfig(url="test", output_dir="/tmp")
         data = SpeechData()

@@ -210,21 +210,25 @@ def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_w
     if costs["total"] == 0:
         return
 
-    print("\n" + SECTION_SEPARATOR)
+    print()
+    print(SECTION_SEPARATOR)
     print("ESTIMATED API COSTS")
     print(SECTION_SEPARATOR)
 
     for detail in costs["details"]:
         print(f"  {detail}")
 
-    print(f"\n  TOTAL: ${costs['total']:.2f} (estimate, using {config.claude_model})")
+    print()
+    print(f"  TOTAL: ${costs['total']:.2f} (estimate, using {config.claude_model})")
     print("  Note: Actual costs may vary based on transcript length")
-    print(SECTION_SEPARATOR + "\n")
+    print(SECTION_SEPARATOR)
+    print()
 
 
 def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     """Merge transcript sources (Whisper, captions, external) using wdiff alignment and LLM adjudication."""
-    print("\n[4b] Merging transcript sources...")
+    print()
+    print("[4b] Merging transcript sources...")
 
     if not config.merge_sources:
         print("  Skipped (--no-merge flag set)")
@@ -368,7 +372,8 @@ def _strip_structured_headers(text: str) -> str:
 
 def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     """Analyze how much of each source transcript survived into the merged output."""
-    print("\n[6] Analyzing source survival...")
+    print()
+    print("[6] Analyzing source survival...")
 
     merged_path = config.output_dir / "transcript_merged.txt"
     analysis_path = config.output_dir / "analysis.md"
@@ -439,7 +444,8 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
         return
 
     # Print summary
-    print(f"\n  {'Source':<25} {'Words':>8} {'Common':>8} {'% of Merged':>12} {'% of Source':>12}")
+    print()
+    print(f"  {'Source':<25} {'Words':>8} {'Common':>8} {'% of Merged':>12} {'% of Source':>12}")
     print(f"  {'-'*25} {'-'*8} {'-'*8} {'-'*12} {'-'*12}")
     for r in results:
         print(f"  {r['name']:<25} {r['source_words']:>8,} {r['common_from_merged']:>8,} "
@@ -448,7 +454,8 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
 
     # Find most similar source
     best = max(results, key=lambda r: r['common_pct_of_merged'])
-    print(f"\n  Merged output most closely resembles: {best['name']} "
+    print()
+    print(f"  Merged output most closely resembles: {best['name']} "
           f"({best['common_pct_of_merged']}% overlap)")
 
     # Write analysis.md
@@ -474,7 +481,8 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
 
     with open(analysis_path, 'w') as f:
         f.write('\n'.join(report))
-    print(f"\n  Analysis saved: {analysis_path.name}")
+    print()
+    print(f"  Analysis saved: {analysis_path.name}")
 
 
 def main():
@@ -587,7 +595,8 @@ Examples:
     media_info = None
     if not args.output_dir:
         try:
-            print("\nFetching media info...")
+            print()
+            print("Fetching media info...")
             media_info = _fetch_metadata(args.url, args.verbose)
             title = media_info.get("title", "speech")
             slug = _slugify_title(title)
@@ -651,16 +660,19 @@ Examples:
                 urllib.request.urlopen(req)
                 print(f"External transcript URL validated: {config.external_transcript}")
             except Exception as e:
-                print(f"\nError: Cannot reach external transcript URL: {config.external_transcript}")
+                print()
+                print(f"Error: Cannot reach external transcript URL: {config.external_transcript}")
                 print(f"  {e}")
                 sys.exit(1)
         elif not Path(config.external_transcript).exists():
-            print(f"\nError: External transcript file not found: {config.external_transcript}")
+            print()
+            print(f"Error: External transcript file not found: {config.external_transcript}")
             sys.exit(1)
 
     # If external transcript is provided, ensure merge is enabled
     if config.external_transcript and not config.merge_sources:
-        print("\nNote: --external-transcript implies merging; enabling merge.")
+        print()
+        print("Note: --external-transcript implies merging; enabling merge.")
         config.merge_sources = True
 
     # Early validation: if using cloud API, check for API key
@@ -668,8 +680,10 @@ Examples:
     if llm_features_requested and not config.no_llm and not config.local:
         api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            print("\nError: --api mode requested but no API key found.")
-            print("\nOptions:")
+            print()
+            print("Error: --api mode requested but no API key found.")
+            print()
+            print("Options:")
             print("  1. Set ANTHROPIC_API_KEY environment variable")
             print("  2. Use --api-key YOUR_KEY")
             print("  3. Remove --api to use local Ollama instead (free)")
@@ -684,7 +698,8 @@ Examples:
     else:
         print(f"  LLM: Anthropic API ({config.claude_model})")
 
-    print(f"\nProcessing: {args.url}")
+    print()
+    print(f"Processing: {args.url}")
     print(f"Output directory: {output_dir}")
 
     # Use pre-fetched metadata for cost estimation
@@ -701,7 +716,8 @@ Examples:
         print_cost_estimate(config, transcript_words=estimated_words)
 
     if config.dry_run:
-        print("\n" + SECTION_SEPARATOR)
+        print()
+        print(SECTION_SEPARATOR)
         print("DRY RUN - No actions will be taken")
         print(SECTION_SEPARATOR)
 
@@ -729,11 +745,14 @@ Examples:
         analyze_source_survival(config, data)
 
         # Summary
-        print("\n" + SECTION_SEPARATOR)
+        print()
+        print(SECTION_SEPARATOR)
         print("COMPLETE!")
         print(SECTION_SEPARATOR)
-        print(f"\nOutput directory: {config.output_dir}")
-        print(f"\nGenerated files:")
+        print()
+        print(f"Output directory: {config.output_dir}")
+        print()
+        print(f"Generated files:")
         if data.audio_path and data.audio_path.exists():
             print(f"  - {data.audio_path.name} (audio)")
         if data.video_path and data.video_path.exists():
@@ -768,13 +787,15 @@ Examples:
             print(f"  - {analysis_file.name} (source survival analysis)")
 
         if not config.no_slides and not config.analyze_slides and data.slide_images:
-            print("\nTip: Run with --analyze-slides to get detailed slide descriptions")
+            print()
+            print("Tip: Run with --analyze-slides to get detailed slide descriptions")
 
         if (not config.merge_sources or config.no_llm) and data.captions_path and data.captions_path.exists() and not data.merged_transcript_path:
             print("Tip: YouTube captions available - run without --no-merge/--no-llm to create a 'critical text'")
 
     except Exception as e:
-        print(f"\nError: {e}")
+        print()
+        print(f"Error: {e}")
         if config.verbose:
             import traceback
             traceback.print_exc()

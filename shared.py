@@ -88,6 +88,7 @@ class SpeechData:
     slide_timestamps: list = field(default_factory=list)  # When each slide appears
     transcript_segments: list = field(default_factory=list)  # Segments with timestamps
     diarization_path: Optional[Path] = None  # Diarized structured transcript
+    metadata: dict = field(default_factory=dict)  # Source metadata (title, description, channel, etc.)
 
 
 def is_up_to_date(output: Path, *inputs: Path) -> bool:

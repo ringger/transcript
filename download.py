@@ -18,7 +18,8 @@ from shared import (
 
 def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) -> None:
     """Download audio, video, and captions using yt-dlp."""
-    print("\n[1] Downloading media...")
+    print()
+    print("[1] Downloading media...")
 
     output_template = str(config.output_dir / "%(title)s.%(ext)s")
 
@@ -52,7 +53,11 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
         if config.external_transcript:
             metadata["external_transcript"] = config.external_transcript
         _save_json(metadata_path, metadata)
+        data.metadata = metadata
         print(f"  Metadata saved: {metadata_path.name}")
+    elif metadata_path.exists():
+        with open(metadata_path) as f:
+            data.metadata = json.load(f)
 
     # Download audio
     audio_path = config.output_dir / "audio.mp3"

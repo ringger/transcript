@@ -17,7 +17,8 @@ from shared import (
 
 def generate_markdown(config: SpeechConfig, data: SpeechData) -> None:
     """Generate markdown document with slides interleaved at correct timestamps."""
-    print("\n[5] Generating markdown...")
+    print()
+    print("[5] Generating markdown...")
 
     markdown_path = config.output_dir / "transcript.md"
 

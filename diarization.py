@@ -27,7 +27,8 @@ def diarize_audio(config: SpeechConfig, data: SpeechData) -> None:
     if not config.diarize:
         return
 
-    print("\n[2b] Diarizing audio...")
+    print()
+    print("[2b] Diarizing audio...")
 
     diarization_json = config.output_dir / "diarization.json"
     diarized_txt = config.output_dir / "diarized.txt"
@@ -284,7 +285,11 @@ def _run_pyannote_steps(config, data, pipeline):
     from pyannote.core import SlidingWindow, SlidingWindowFeature
     from pyannote.audio.utils.signal import binarize
 
+    # Prefer WAV over MP3 for pyannote (MP3 decoding has sample-count rounding issues)
     audio_path = data.audio_path
+    wav_path = audio_path.with_suffix(".wav")
+    if wav_path.exists():
+        audio_path = wav_path
     seg_npy = config.output_dir / "diarization_segmentation.npy"
     seg_meta = config.output_dir / "diarization_segmentation_meta.json"
     emb_npy = config.output_dir / "diarization_embeddings.npy"
@@ -489,7 +494,7 @@ def _identify_speakers(config: SpeechConfig, data: SpeechData) -> None:
         print(f"  Could not extract intro for speaker identification")
         return
 
-    name_map = _llm_identify_speakers(config, seen, intro_text)
+    name_map = _llm_identify_speakers(config, seen, intro_text, data.metadata)
     if name_map:
         _apply_speaker_names(data, name_map)
         print(f"  Speaker mapping (LLM): {name_map}")
@@ -512,19 +517,35 @@ def _get_intro_text(data: SpeechData) -> str:
 
 
 def _llm_identify_speakers(config: SpeechConfig, speakers: list,
-                            intro_text: str) -> dict:
+                            intro_text: str, metadata: dict = None) -> dict:
     """Use LLM to identify speaker names from transcript introductions."""
     speaker_list = ", ".join(speakers)
 
+    metadata_section = ""
+    if metadata:
+        parts = []
+        if metadata.get("title"):
+            parts.append(f"Title: {metadata['title']}")
+        if metadata.get("description"):
+            parts.append(f"Description: {metadata['description']}")
+        if metadata.get("channel"):
+            parts.append(f"Channel: {metadata['channel']}")
+        if parts:
+            metadata_section = (
+                "\n\nMETADATA (from the video source — use for correct name spellings):\n"
+                + "\n".join(parts)
+            )
+
     prompt = f"""Below is the beginning of a transcript with speaker labels.
 Identify who each speaker is based on introductions, context clues, or how they refer to each other.
+{metadata_section}
 
 SPEAKERS: {speaker_list}
 
 TRANSCRIPT:
 {intro_text}
 
-For each speaker label, provide their real name. If you cannot determine a speaker's name, keep the original label.
+For each speaker label, provide their real name. Use the metadata above for correct spellings when available. If you cannot determine a speaker's name, keep the original label.
 Reply ONLY with a JSON object mapping speaker labels to names, like:
 {{"SPEAKER_00": "John Smith", "SPEAKER_01": "Jane Doe"}}"""
 
