@@ -14,8 +14,23 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-import functools
-print = functools.partial(print, flush=True)
+import builtins
+
+
+def tprint(*args, **kwargs):
+    """Print with [HH:MM:SS] timestamp prefix.
+
+    Skips the timestamp for carriage-return progress lines (end != newline)
+    so that in-place progress updates remain clean.
+    """
+    if kwargs.get("end", "\n") != "\n":
+        builtins.print(*args, flush=True, **kwargs)
+        return
+    stamp = time.strftime("[%H:%M:%S]")
+    builtins.print(stamp, *args, flush=True, **kwargs)
+
+
+print = tprint
 
 # Whisper model sizes in descending quality order (used for base-model selection)
 MODEL_SIZES = ["large", "medium", "small", "base", "tiny"]

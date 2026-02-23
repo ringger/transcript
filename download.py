@@ -4,15 +4,13 @@ Download module for the speech transcription pipeline.
 Handles downloading audio, video, and captions from video URLs using yt-dlp.
 """
 
-import functools
 import json
 import re
 import subprocess
 from pathlib import Path
 
-print = functools.partial(print, flush=True)
-
 from shared import (
+    tprint as print,
     SpeechConfig, SpeechData,
     run_command, _save_json, _print_reusing, _dry_run_skip,
 )

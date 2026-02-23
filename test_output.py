@@ -201,6 +201,54 @@ class TestGenerateInterleavedMarkdown:
         result = _generate_interleaved_markdown(data)
         assert "merged version available" in result
 
+    def test_speaker_grouping(self):
+        """Consecutive segments from the same speaker should be grouped."""
+        data = SpeechData(
+            title="Test",
+            transcript_segments=[
+                {"start": 0.0, "end": 2.0, "text": "First sentence.", "speaker": "Alice"},
+                {"start": 2.0, "end": 4.0, "text": "Second sentence.", "speaker": "Alice"},
+                {"start": 4.0, "end": 6.0, "text": "Third sentence.", "speaker": "Bob"},
+            ],
+        )
+        result = _generate_interleaved_markdown(data)
+        # Alice's sentences should be grouped together
+        assert "First sentence. Second sentence." in result
+        # Both speakers should appear in bold
+        assert "**Alice**" in result
+        assert "**Bob**" in result
+
+    def test_slide_out_of_bounds_skipped(self):
+        """Slide with index beyond slide_images should be skipped."""
+        slide_img = Path("/tmp/slide_0001.png")
+        data = SpeechData(
+            title="Test",
+            transcript_segments=[
+                {"start": 0.0, "end": 5.0, "text": "Some text."},
+            ],
+            slide_timestamps=[
+                {"slide_number": 1, "timestamp": 1.0},
+                {"slide_number": 5, "timestamp": 3.0},  # out of bounds
+            ],
+            slide_images=[slide_img],
+        )
+        result = _generate_interleaved_markdown(data)
+        assert "slide_0001.png" in result
+        # Out-of-bounds slide should not appear
+        assert result.count("![") == 1
+
+    def test_no_speaker_label(self):
+        """Segments without speaker labels should render without bold header."""
+        data = SpeechData(
+            title="Test",
+            transcript_segments=[
+                {"start": 0.0, "end": 2.0, "text": "No speaker here."},
+            ],
+        )
+        result = _generate_interleaved_markdown(data)
+        assert "No speaker here." in result
+        assert "**" not in result.split("---")[1].split("---")[0]  # no bold in transcript body
+
 
 # ---------------------------------------------------------------------------
 # generate_markdown — integration (layout selection)

@@ -5,16 +5,14 @@ Handles speaker diarization using pyannote.audio, assigning speaker labels
 to transcript segments based on word-level timestamps from Whisper.
 """
 
-import functools
 import json
 import os
 from pathlib import Path
 
-print = functools.partial(print, flush=True)
-
 import numpy as np
 
 from shared import (
+    tprint as print,
     SpeechConfig, SpeechData,
     create_llm_client, llm_call_with_retry,
     is_up_to_date, _save_json, _should_skip,

@@ -1296,6 +1296,149 @@ class TestChunkCheckpoints:
 
 
 # ---------------------------------------------------------------------------
+# _merge_structured: skeleton_source_name parameter
+# ---------------------------------------------------------------------------
+
+class TestMergeStructuredSkeletonSourceName:
+    """Test the skeleton_source_name parameter in _merge_structured."""
+
+    @patch("merge._build_wdiff_alignment")
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_custom_skeleton_source_name(self, mock_api, mock_client, mock_align, tmp_path):
+        """skeleton_source_name='Diarized Transcript' correctly identifies the anchor."""
+        segments = [
+            {"speaker": "Alice", "timestamp": "0:00:00", "text": "Hello world"},
+            {"speaker": "Bob", "timestamp": "0:01:00", "text": "Goodbye moon"},
+        ]
+        diarized_text = "Hello world Goodbye moon"
+        all_sources = [
+            ("Whisper AI Transcript", "whisper", "Hello world Goodbye moon"),
+            ("Diarized Transcript", "diarized", diarized_text),
+        ]
+
+        word_count = len(diarized_text.split())
+        mock_align.return_value = list(range(word_count + 1))
+
+        source_paths = [tmp_path / "src.txt"]
+        source_paths[0].write_text("x")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+
+        def fake_api(*args, **kwargs):
+            msg = MagicMock()
+            msg.content = [MagicMock()]
+            msg.content[0].text = (
+                "PASSAGE 1: Hello world\n"
+                "PASSAGE 2: Goodbye moon"
+            )
+            return msg
+
+        mock_api.side_effect = fake_api
+
+        result = _merge_structured(
+            segments, all_sources, config, source_paths,
+            skeleton_source_name="Diarized Transcript",
+        )
+        assert len(result) == 2
+        assert result[0]["speaker"] == "Alice"
+        assert result[1]["speaker"] == "Bob"
+
+    def test_missing_skeleton_source_raises(self, tmp_path):
+        """ValueError raised when skeleton_source_name not found in all_sources."""
+        segments = [{"speaker": "A", "timestamp": "0:00:00", "text": "Hi"}]
+        all_sources = [("Whisper AI Transcript", "whisper", "Hi")]
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+
+        with pytest.raises(ValueError, match="not found in all_sources"):
+            _merge_structured(
+                segments, all_sources, config,
+                skeleton_source_name="Nonexistent Source",
+            )
+
+
+# ---------------------------------------------------------------------------
+# _wdiff_stats — additional edge cases
+# ---------------------------------------------------------------------------
+
+class TestWdiffStatsEdgeCases:
+    def test_empty_text_a_no_key(self):
+        """Empty text_a produces no 'a' key (wdiff omits zero-word stats)."""
+        stats = _wdiff_stats("", "hello world")
+        assert "a" not in stats
+        assert stats["b"]["words"] == 2
+
+    def test_empty_text_b_no_key(self):
+        """Empty text_b produces no 'b' key."""
+        stats = _wdiff_stats("hello world", "")
+        assert "b" not in stats
+        assert stats["a"]["words"] == 2
+
+    def test_single_word_identical_no_stats(self):
+        """Single identical word: wdiff -s doesn't output stats for trivial cases."""
+        stats = _wdiff_stats("hello", "hello")
+        # wdiff omits stats line for very short identical texts
+        assert stats == {} or (stats.get("a", {}).get("common_pct", 100) == 100)
+
+    def test_multiword_single_change(self):
+        stats = _wdiff_stats("hello world", "hello earth")
+        assert stats["a"]["words"] == 2
+        assert stats["a"]["common"] == 1
+        assert stats["b"]["common"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _merge_multi_source — additional edge cases
+# ---------------------------------------------------------------------------
+
+class TestMergeMultiSourceEdgeCases:
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_identical_sources_no_diffs(self, mock_api, mock_client, tmp_path):
+        """When sources are identical, merge should still succeed."""
+        text = "the quick brown fox jumps over the lazy dog " * 60
+        sources = [
+            ("Source A", "a", text),
+            ("Source B", "b", text),
+        ]
+        source_paths = [tmp_path / "src.txt"]
+        source_paths[0].write_text("x")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+
+        def fake_api(*args, **kwargs):
+            msg = MagicMock()
+            msg.content = [MagicMock()]
+            msg.content[0].text = "the quick brown fox jumps over the lazy dog " * 60
+            return msg
+
+        mock_api.side_effect = fake_api
+        result = _merge_multi_source(sources, config, source_paths)
+        assert len(result) > 0
+
+    @patch("merge.create_llm_client")
+    @patch("merge.llm_call_with_retry")
+    def test_short_text_single_chunk(self, mock_api, mock_client, tmp_path):
+        """Short text should produce a single chunk."""
+        sources = [
+            ("Source A", "a", "hello world foo bar"),
+            ("Source B", "b", "hello world foo baz"),
+        ]
+        source_paths = [tmp_path / "src.txt"]
+        source_paths[0].write_text("x")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+
+        def fake_api(*args, **kwargs):
+            msg = MagicMock()
+            msg.content = [MagicMock()]
+            msg.content[0].text = "hello world foo bar"
+            return msg
+
+        mock_api.side_effect = fake_api
+        result = _merge_multi_source(sources, config, source_paths)
+        assert mock_api.call_count == 1
+        assert "hello" in result
+
+
+# ---------------------------------------------------------------------------
 # _write_temp_text
 # ---------------------------------------------------------------------------
 

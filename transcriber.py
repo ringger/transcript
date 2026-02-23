@@ -49,6 +49,7 @@ import sys
 from pathlib import Path
 
 from shared import (
+    tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     run_command, _print_reusing, _dry_run_skip, _should_skip,
     _collect_source_paths, check_dependencies,

@@ -5,13 +5,11 @@ Handles speech-to-text transcription with Whisper models, including
 multi-model ensembling via wdiff analysis and LLM adjudication.
 """
 
-import functools
 import json
 from pathlib import Path
 
-print = functools.partial(print, flush=True)
-
 from shared import (
+    tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     create_llm_client, llm_call_with_retry,
     run_command, _save_json, _print_reusing, _dry_run_skip, _should_skip,

@@ -415,3 +415,100 @@ class TestDryRunNoSideEffects:
         assert "[dry-run]" in out
         assert "Would download audio" in out
         assert "Would save metadata" in out
+
+
+# ---------------------------------------------------------------------------
+# Diarized skeleton merge routing
+# ---------------------------------------------------------------------------
+
+class TestDiarizedSkeletonRouting:
+    """Test merge routing when diarized transcript provides structure."""
+
+    def _make_diarized_artefacts(self, tmp_path, *, has_external=False, has_captions=False):
+        """Create artefacts for diarized skeleton routing tests."""
+        whisper = tmp_path / "ensembled.txt"
+        whisper.write_text("Hello world this is a test transcript " * 30)
+
+        diarized = tmp_path / "diarized.txt"
+        diarized.write_text(
+            "[0:00:00] Alice: Hello world this is a test transcript.\n"
+            "[0:01:00] Bob: And here is more content for testing.\n"
+        )
+
+        config = SpeechConfig(
+            url="https://example.com/video",
+            output_dir=tmp_path,
+            skip_existing=False,
+            merge_sources=True,
+            no_llm=False,
+            local=False,
+            api_key="fake-key",
+            diarize=True,
+        )
+        data = SpeechData(
+            transcript_path=whisper,
+            diarization_path=diarized,
+        )
+
+        if has_captions:
+            captions_vtt = tmp_path / "captions.en.vtt"
+            captions_vtt.write_text(
+                "WEBVTT\n\n"
+                "00:00:01.000 --> 00:00:05.000\n"
+                "Hello world this is a test transcript\n"
+            )
+            data.captions_path = captions_vtt
+
+        if has_external:
+            config.external_transcript = str(tmp_path / "external.txt")
+            ext = tmp_path / "external.txt"
+            ext.write_text(
+                "Alice (0:00:00) Hello world this is a test transcript.\n"
+                "Bob (0:01:00) And here is more content for testing.\n"
+            )
+
+        return config, data
+
+    def test_diarized_only_whisper_skips_merge(self, tmp_path, capsys):
+        """Diarized skeleton + only Whisper → uses diarized text directly."""
+        config, data = self._make_diarized_artefacts(tmp_path)
+        merge_transcript_sources(config, data)
+        out = capsys.readouterr().out
+        assert "Single source with diarized skeleton" in out
+        assert data.merged_transcript_path is not None
+        content = data.merged_transcript_path.read_text()
+        assert "[0:00:00] Alice:" in content
+
+    @patch("transcriber._merge_structured")
+    def test_diarized_with_captions_calls_structured_merge(self, mock_merge, tmp_path, capsys):
+        """Diarized skeleton + Whisper + captions → structured merge with 'Diarized Transcript'."""
+        config, data = self._make_diarized_artefacts(tmp_path, has_captions=True)
+
+        mock_merge.return_value = [
+            {"speaker": "Alice", "timestamp": "0:00:00", "text": "Merged text one."},
+            {"speaker": "Bob", "timestamp": "0:01:00", "text": "Merged text two."},
+        ]
+
+        merge_transcript_sources(config, data)
+
+        mock_merge.assert_called_once()
+        call_kwargs = mock_merge.call_args
+        assert call_kwargs[1]["skeleton_source_name"] == "Diarized Transcript"
+
+    @patch("transcriber._merge_structured")
+    def test_external_takes_priority_over_diarized(self, mock_merge, tmp_path, capsys):
+        """External transcript provides skeleton even when diarized exists."""
+        config, data = self._make_diarized_artefacts(tmp_path, has_external=True)
+
+        mock_merge.return_value = [
+            {"speaker": "Alice", "timestamp": "0:00:00", "text": "From external."},
+            {"speaker": "Bob", "timestamp": "0:01:00", "text": "Also from external."},
+        ]
+
+        merge_transcript_sources(config, data)
+
+        mock_merge.assert_called_once()
+        call_kwargs = mock_merge.call_args
+        assert call_kwargs[1]["skeleton_source_name"] == "External Transcript"
+        out = capsys.readouterr().out
+        assert "external transcript provides structure" in out

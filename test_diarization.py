@@ -18,6 +18,7 @@ from diarization import (
     _identify_speakers,
     _apply_speaker_names,
     _make_progress_hook,
+    _run_pyannote,
     _run_pyannote_steps,
     diarize_audio,
 )
@@ -583,5 +584,135 @@ class TestRunPyannoteSteps:
 
         # Segmentation should have been re-run since cache is stale
         pipeline.get_segmentations.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _run_pyannote (outer function: cache, HF token, GPU selection)
+# ---------------------------------------------------------------------------
+
+class TestRunPyannoteOuter:
+    def test_returns_cached_result(self, tmp_path):
+        """If output_path exists, return cached JSON without loading pipeline."""
+        output_path = tmp_path / "diarization.json"
+        cached = [{"start": 0, "end": 5, "speaker": "SPEAKER_00"}]
+        output_path.write_text(json.dumps(cached))
+
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+        data.audio_path = tmp_path / "audio.mp3"
+
+        result = _run_pyannote(config, data, output_path)
+        assert result == cached
+
+    def test_missing_hf_token_raises(self, tmp_path, monkeypatch):
+        """RuntimeError when no HF token available."""
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        # Ensure fallback path doesn't exist
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+
+        output_path = tmp_path / "diarization.json"
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+        data.audio_path = tmp_path / "audio.mp3"
+
+        # Mock only pyannote.audio so the import inside _run_pyannote succeeds
+        mock_pyannote_audio = MagicMock()
+        with patch.dict("sys.modules", {
+            "pyannote": MagicMock(),
+            "pyannote.audio": mock_pyannote_audio,
+        }):
+            with pytest.raises(RuntimeError, match="HF_TOKEN"):
+                _run_pyannote(config, data, output_path)
+
+    def _run_with_mocks(self, tmp_path, monkeypatch, *,
+                         hf_token_env=None, hf_token_file=None,
+                         cuda=False, mps=False):
+        """Helper to run _run_pyannote with mocked pyannote and torch.
+
+        Returns (mock_pipeline_cls, mock_pipeline, capsys-like captured output).
+        """
+        if hf_token_env:
+            monkeypatch.setenv("HF_TOKEN", hf_token_env)
+        else:
+            monkeypatch.delenv("HF_TOKEN", raising=False)
+
+        if hf_token_file:
+            token_dir = tmp_path / ".cache" / "huggingface"
+            token_dir.mkdir(parents=True)
+            (token_dir / "token").write_text(f"{hf_token_file}\n")
+            monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        mock_pipeline = MagicMock()
+        mock_pipeline_cls = MagicMock()
+        mock_pipeline_cls.from_pretrained.return_value = mock_pipeline
+
+        mock_diarization = MagicMock()
+        mock_diarization.itertracks.return_value = [
+            (MagicMock(start=0.0, end=5.0), None, "SPEAKER_00"),
+        ]
+
+        # Real torch is installed, so we patch its attributes rather than replacing it
+        import torch as real_torch
+
+        output_path = tmp_path / "diarization.json"
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+        data.audio_path = tmp_path / "audio.mp3"
+
+        mock_pyannote_audio = MagicMock()
+        mock_pyannote_audio.Pipeline = mock_pipeline_cls
+
+        with patch.dict("sys.modules", {
+            "pyannote": MagicMock(),
+            "pyannote.audio": mock_pyannote_audio,
+        }):
+            with patch("diarization._run_pyannote_steps", return_value=mock_diarization):
+                with patch.object(real_torch.cuda, "is_available", return_value=cuda):
+                    with patch.object(real_torch.backends.mps, "is_available", return_value=mps):
+                        _run_pyannote(config, data, output_path)
+
+        return mock_pipeline_cls, mock_pipeline
+
+    def test_hf_token_from_env(self, tmp_path, monkeypatch):
+        """HF_TOKEN from env var is used for Pipeline.from_pretrained."""
+        mock_cls, _ = self._run_with_mocks(
+            tmp_path, monkeypatch, hf_token_env="test-token-123",
+        )
+        call_kwargs = mock_cls.from_pretrained.call_args
+        assert call_kwargs[1]["token"] == "test-token-123"
+
+    def test_hf_token_fallback_to_cache_file(self, tmp_path, monkeypatch):
+        """Falls back to ~/.cache/huggingface/token when HF_TOKEN not set."""
+        mock_cls, _ = self._run_with_mocks(
+            tmp_path, monkeypatch, hf_token_file="cached-token-456",
+        )
+        call_kwargs = mock_cls.from_pretrained.call_args
+        assert call_kwargs[1]["token"] == "cached-token-456"
+
+    def test_gpu_selection_cuda(self, tmp_path, monkeypatch, capsys):
+        """CUDA selected when available."""
+        _, mock_pipeline = self._run_with_mocks(
+            tmp_path, monkeypatch, hf_token_env="tok", cuda=True,
+        )
+        out = capsys.readouterr().out
+        assert "CUDA" in out
+
+    def test_gpu_selection_mps(self, tmp_path, monkeypatch, capsys):
+        """MPS (Apple Metal) selected when CUDA unavailable."""
+        _, mock_pipeline = self._run_with_mocks(
+            tmp_path, monkeypatch, hf_token_env="tok", mps=True,
+        )
+        out = capsys.readouterr().out
+        assert "Apple Metal" in out
+
+    def test_gpu_fallback_cpu(self, tmp_path, monkeypatch, capsys):
+        """Falls back to CPU when no GPU available."""
+        _, mock_pipeline = self._run_with_mocks(
+            tmp_path, monkeypatch, hf_token_env="tok",
+        )
+        out = capsys.readouterr().out
+        assert "CPU" in out
 
 

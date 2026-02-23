@@ -11,11 +11,10 @@ import re
 import shutil
 import subprocess
 
-from shared import SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date, _save_json
-
-# Ensure print output is flushed immediately
-import functools
-print = functools.partial(print, flush=True)
+from shared import (
+    tprint as print,
+    SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date, _save_json,
+)
 
 
 def _write_temp_text(content: str) -> str:

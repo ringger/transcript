@@ -6,15 +6,13 @@ vision-based slide analysis, and basic slide metadata generation.
 """
 
 import base64
-import functools
 import json
 import re
-
-print = functools.partial(print, flush=True)
 import subprocess
 from pathlib import Path
 
 from shared import (
+    tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     create_llm_client, llm_call_with_retry,
     _save_json, _print_reusing, _dry_run_skip, _should_skip,

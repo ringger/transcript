@@ -5,13 +5,11 @@ Generates markdown documents with slides interleaved at correct timestamps
 or in a sequential gallery layout.
 """
 
-import functools
 import re
 from pathlib import Path
 
-print = functools.partial(print, flush=True)
-
 from shared import (
+    tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     _print_reusing, _dry_run_skip, _should_skip,
 )
