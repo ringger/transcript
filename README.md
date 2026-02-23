@@ -154,16 +154,18 @@ output_dir/
 
 ## Pipeline Stages
 
-| Stage | Tool | LLM Required |
-|-------|------|--------------|
-| 1. Download media | yt-dlp | No |
-| 2. Transcribe audio | mlx-whisper | No |
-| 2b. Speaker diarization | pyannote.audio | Optional (for names) |
-| 3. Extract slides | ffmpeg | No |
-| 4a. Ensemble Whisper models | LLM + wdiff | Yes (local or API) |
-| 4b. Merge transcript sources | LLM + wdiff | Yes (local or API) |
-| 5. Generate markdown | Python | No |
-| 6. Source survival analysis | wdiff | No |
+Optional stages are skipped based on flags. Stage numbers are fixed regardless of which stages run.
+
+| Stage | Tool | Optional |
+|-------|------|----------|
+| [1] Download media | yt-dlp | No |
+| [2] Transcribe audio | mlx-whisper | No |
+| [2b] Speaker diarization | pyannote.audio | Yes (`--diarize`) |
+| [3] Extract slides | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
+| [4] Analyze slides with vision | LLM + vision | Yes (`--analyze-slides`) |
+| [4b] Merge transcript sources | LLM + wdiff | Yes (on by default; `--no-merge` to skip) |
+| [5] Generate markdown | Python | No |
+| [6] Source survival analysis | wdiff | No |
 
 ## How It Works
 
@@ -201,6 +203,21 @@ When using multiple Whisper models (default: `small,medium`):
 1. Runs each model independently
 2. Uses `wdiff` to identify differences (normalized: no caps, no punctuation)
 3. Claude resolves disagreements, preferring real words over transcription errors and proper nouns over generic alternatives
+
+### Speaker Diarization
+
+When `--diarize` is enabled, the pipeline identifies who is speaking at each point in the audio by combining two independent signals:
+
+1. **pyannote.audio** runs a neural segmentation model over the audio in sliding ~5-second windows, producing frame-level speaker activity probabilities. A global clustering step stitches local predictions across the full recording into consistent speaker labels (SPEAKER_00, SPEAKER_01, etc.). The model handles overlapping speech natively and operates purely on the audio signal — no linguistic content is used.
+
+2. **Whisper word timestamps** (`--word-timestamps True`) provide per-word `{start, end}` timing from the transcription model.
+
+The pipeline links these by **midpoint matching**: for each word, it finds which speaker segment overlaps the word's temporal midpoint. Each transcript segment is then assigned the majority speaker of its constituent words. The result is a structured transcript in bracketed format (`[H:MM:SS] Speaker: text`) that feeds directly into the existing merge pipeline as a structural skeleton.
+
+**Speaker identification** maps generic labels to real names via three methods (in priority order):
+- `--speaker-names "Alice,Bob"` — manual mapping by order of first appearance
+- LLM-based detection — reads the first ~500 words and infers names from introductions
+- `--no-llm` — keeps generic SPEAKER_00/SPEAKER_01 labels
 
 ### Make-Style Staleness Checks
 

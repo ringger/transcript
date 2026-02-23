@@ -95,8 +95,8 @@ def _normalize_for_comparison(text: str) -> str:
     """Normalize text for comparison: lowercase, strip punctuation per-word.
 
     Preserves word count: punctuation-only tokens (em-dashes, ellipses, etc.)
-    are replaced with a placeholder so alignment maps stay in sync with
-    original word positions.
+    are replaced with an underscore (_) placeholder so alignment maps stay
+    in sync with original word positions.
     """
     words = text.split()
     normalized = []

@@ -222,8 +222,8 @@ def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_w
 
 
 def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
-    """Merge YouTube captions with Whisper transcript using wdiff analysis and Claude API."""
-    print("\n[4b/5] Merging transcript sources...")
+    """Merge transcript sources (Whisper, captions, external) using wdiff alignment and LLM adjudication."""
+    print("\n[4b] Merging transcript sources...")
 
     if not config.merge_sources:
         print("  Skipped (--no-merge flag set)")
@@ -285,12 +285,16 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     if external_text:
         sources.append(("External Transcript", "additional reference source provided by user", external_text))
 
-    # Load diarized transcript if available (use as structural skeleton)
+    # Load diarized transcript if available — provides structural skeleton
+    # (not added as a text source since its text duplicates the Whisper transcript)
     diarized_text = None
-    if has_diarized and not external_text:
+    if has_diarized:
         with open(data.diarization_path, 'r') as f:
             diarized_text = f.read()
-        print(f"  Diarized transcript: {len(diarized_text.split())} words")
+        if external_text:
+            print(f"  Diarized transcript available but external transcript provides structure")
+        else:
+            print(f"  Diarized transcript: {len(diarized_text.split())} words (structural skeleton)")
 
     print(f"  Merging {len(sources)} sources: {', '.join(s[0] for s in sources)}")
 
@@ -298,12 +302,14 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
         print("  Need at least 2 sources to merge, skipping")
         return
 
-    # Check if external transcript or diarized transcript has structure
+    # Check if external or diarized transcript has structure (speaker labels).
+    # External takes priority as skeleton (authoritative speaker names);
+    # diarized is used as skeleton only when no external is provided.
     structure = None
     structured_text = external_text or diarized_text
     if structured_text:
         structure = _detect_transcript_structure(structured_text)
-        struct_label = "diarized" if diarized_text and not external_text else "external"
+        struct_label = "external" if external_text else "diarized"
         if structure["has_speakers"]:
             print(f"  Detected structured {struct_label} transcript (format: {structure['format']}, "
                   f"speakers: {structure['has_speakers']}, timestamps: {structure['has_timestamps']})")
@@ -343,7 +349,7 @@ def _strip_structured_headers(text: str) -> str:
 
 def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     """Analyze how much of each source transcript survived into the merged output."""
-    print("\n[6/6] Analyzing source survival...")
+    print("\n[6] Analyzing source survival...")
 
     merged_path = config.output_dir / "transcript_merged.txt"
     analysis_path = config.output_dir / "analysis.md"

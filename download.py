@@ -20,7 +20,7 @@ from shared import (
 
 def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) -> None:
     """Download audio, video, and captions using yt-dlp."""
-    print("\n[1/5] Downloading media...")
+    print("\n[1] Downloading media...")
 
     output_template = str(config.output_dir / "%(title)s.%(ext)s")
 

@@ -27,7 +27,7 @@ def diarize_audio(config: SpeechConfig, data: SpeechData) -> None:
     if not config.diarize:
         return
 
-    print("\n[2b/5] Diarizing audio...")
+    print("\n[2b] Diarizing audio...")
 
     diarization_json = config.output_dir / "diarization.json"
     diarized_txt = config.output_dir / "diarized.txt"

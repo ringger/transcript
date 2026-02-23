@@ -32,7 +32,7 @@ class SpeechConfig:
     merge_sources: bool = True  # Merge YouTube captions with Whisper (default: on)
     no_llm: bool = False  # Skip all LLM-dependent features (merging, ensembling, slide analysis)
     api_key: Optional[str] = None
-    claude_model: str = "claude-sonnet-4-20250514"
+    claude_model: str = "claude-sonnet-4-20250514"  # Anthropic API model; ignored when local=True (uses local_model)
     skip_existing: bool = True
     no_slides: bool = False  # Skip slide extraction entirely
     podcast: bool = False  # Podcast mode: audio-only, skip video + captions
@@ -215,7 +215,7 @@ def llm_call_with_retry(client, config: SpeechConfig, **kwargs) -> object:
             (429, 529, 500), "API")
 
 
-# Keep old name as alias for backward compatibility in tests
+# Backward compatibility: tests may still import this old name
 api_call_with_retry = llm_call_with_retry
 
 

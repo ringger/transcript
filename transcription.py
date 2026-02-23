@@ -30,7 +30,7 @@ def _select_largest_model_json(data: SpeechData):
 
 def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
     """Transcribe audio using Whisper, supporting multiple models for ensembling."""
-    print("\n[2/5] Transcribing audio...")
+    print("\n[2] Transcribing audio...")
 
     if not config.dry_run and (not data.audio_path or not data.audio_path.exists()):
         raise FileNotFoundError(f"Audio file not found: {data.audio_path}")
