@@ -495,11 +495,12 @@ def _compute_chunk_diffs(chunk_texts: list, config: SpeechConfig) -> str:
 
 
 def _merge_structured(skeleton_segments: list, all_sources: list,
-                      config: SpeechConfig, source_paths: list = None) -> list:
+                      config: SpeechConfig, source_paths: list = None,
+                      skeleton_source_name: str = "External Transcript") -> list:
     """Merge transcript sources using blind, label-free presentation.
 
     The skeleton_segments provide structure (speaker labels, timestamps, segment
-    boundaries) from the external transcript. Text is presented to the LLM
+    boundaries) from the structured source. Text is presented to the LLM
     anonymously — no source names, no speaker labels, no timestamps — so that
     no source receives preferential treatment.
 
@@ -510,7 +511,8 @@ def _merge_structured(skeleton_segments: list, all_sources: list,
     for staleness against source_paths and reused when fresh.
 
     skeleton_segments: parsed segments from _parse_structured_transcript
-    all_sources: list of (name, description, text) tuples (ALL sources including external)
+    all_sources: list of (name, description, text) tuples including the skeleton source
+    skeleton_source_name: name of the source whose text matches the skeleton
     source_paths: list of Path objects for staleness checks
 
     Returns list of merged segments (same structure as skeleton_segments).
@@ -519,17 +521,17 @@ def _merge_structured(skeleton_segments: list, all_sources: list,
 
     chunks_dir = _init_merge_chunks_dir(config)
 
-    # Step 1: Separate external from other sources
-    external_text = None
+    # Step 1: Separate skeleton source from other sources
+    skeleton_text = None
     other_sources = []
     for name, desc, text in all_sources:
-        if name == "External Transcript":
-            external_text = text
+        if name == skeleton_source_name:
+            skeleton_text = text
         else:
             other_sources.append((name, desc, text))
 
-    if external_text is None:
-        raise ValueError("External Transcript not found in all_sources")
+    if skeleton_text is None:
+        raise ValueError(f"Skeleton source '{skeleton_source_name}' not found in all_sources")
 
     num_sources = 1 + len(other_sources)  # external + others
 

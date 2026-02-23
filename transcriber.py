@@ -317,12 +317,30 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     # Route to structured merge if we have speaker labels
     if structure and structure["has_speakers"]:
         skeleton_segments = _parse_structured_transcript(structured_text, structure["format"])
-        print(f"  Parsed {len(skeleton_segments)} segments from external transcript")
+        print(f"  Parsed {len(skeleton_segments)} segments from {struct_label} transcript")
 
-        # Pass all sources — text is treated equally, structure comes from skeleton
-        corrected_segments = _merge_structured(skeleton_segments, sources,
-                                               config, merge_inputs)
-        merged_text = _format_structured_segments(corrected_segments)
+        if len(sources) < 2 and not external_text:
+            # Diarized skeleton with only Whisper — no LLM merge needed.
+            # The diarized transcript already has structure + Whisper text.
+            print("  Single source with diarized skeleton — using diarized text directly")
+            merged_text = diarized_text
+        else:
+            # Add the skeleton's text as a source so _merge_structured can
+            # use it as the alignment anchor.
+            skeleton_source_name = "External Transcript"
+            if not external_text and diarized_text:
+                skeleton_source_name = "Diarized Transcript"
+                plain_diarized = " ".join(
+                    seg["text"] for seg in skeleton_segments)
+                sources.append((
+                    skeleton_source_name,
+                    "diarized transcript with speaker labels",
+                    plain_diarized,
+                ))
+            corrected_segments = _merge_structured(
+                skeleton_segments, sources, config, merge_inputs,
+                skeleton_source_name=skeleton_source_name)
+            merged_text = _format_structured_segments(corrected_segments)
     else:
         # Flat merge: wdiff alignment and anonymous presentation
         merged_text = _merge_multi_source(sources, config, merge_inputs)
