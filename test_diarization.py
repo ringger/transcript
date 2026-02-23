@@ -1,8 +1,10 @@
 """Tests for diarization.py — speaker diarization, assignment, and identification."""
 
 import json
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from shared import SpeechConfig, SpeechData
@@ -15,6 +17,8 @@ from diarization import (
     _get_intro_text,
     _identify_speakers,
     _apply_speaker_names,
+    _make_progress_hook,
+    _run_pyannote_steps,
     diarize_audio,
 )
 
@@ -375,3 +379,209 @@ class TestDiarizeAudio:
         data.audio_path = audio
         diarize_audio(config, data)
         assert data.diarization_path == diarized
+
+
+# ---------------------------------------------------------------------------
+# _make_progress_hook
+# ---------------------------------------------------------------------------
+
+class TestMakeProgressHook:
+    def test_prints_progress(self, capsys):
+        hook = _make_progress_hook()
+        hook("embeddings", None, completed=5, total=10)
+        captured = capsys.readouterr()
+        assert "50%" in captured.out
+        assert "5/10" in captured.out
+
+    def test_prints_done_at_completion(self, capsys):
+        hook = _make_progress_hook()
+        hook("embeddings", None, completed=10, total=10)
+        captured = capsys.readouterr()
+        assert "done" in captured.out
+
+    def test_no_crash_without_progress(self):
+        hook = _make_progress_hook()
+        # Called without completed/total — should not crash
+        hook("segmentation", "some_artifact")
+
+
+# ---------------------------------------------------------------------------
+# _run_pyannote_steps (checkpoint logic)
+# ---------------------------------------------------------------------------
+
+def _make_mock_pipeline():
+    """Create a mock pyannote pipeline with step methods for testing."""
+    pipeline = MagicMock()
+
+    # Segmentation model attributes
+    pipeline._segmentation.model.specifications.powerset = True
+    pipeline._segmentation.model.receptive_field = MagicMock()
+
+    # Segmentation returns SlidingWindowFeature-like object
+    seg_data = np.random.rand(10, 50, 3).astype(np.float32)
+    mock_swf = MagicMock()
+    mock_swf.data = seg_data
+    mock_swf.sliding_window.start = 0.0
+    mock_swf.sliding_window.duration = 5.0
+    mock_swf.sliding_window.step = 0.5
+    pipeline.get_segmentations.return_value = mock_swf
+
+    # Speaker count returns SlidingWindowFeature with non-zero data
+    count_swf = MagicMock()
+    count_swf.data = np.array([[1], [2], [1]], dtype=np.uint8)
+    pipeline.speaker_count.return_value = count_swf
+
+    # Embeddings
+    embeddings = np.random.rand(10, 3, 192).astype(np.float32)
+    pipeline.get_embeddings.return_value = embeddings
+    pipeline.embedding_exclude_overlap = False
+
+    # Clustering
+    hard_clusters = np.array([[0, 1, -2]] * 10, dtype=np.int32)
+    centroids = np.random.rand(2, 192).astype(np.float32)
+    pipeline.clustering.return_value = (hard_clusters, None, centroids)
+
+    # Reconstruction
+    mock_annotation = MagicMock()
+    mock_annotation.labels.return_value = [0, 1]
+    mock_annotation.rename_labels.return_value = mock_annotation
+    pipeline.to_annotation.return_value = mock_annotation
+    pipeline.reconstruct.return_value = MagicMock()
+    pipeline.segmentation.min_duration_off = 0.0
+    pipeline.classes.return_value = iter(["SPEAKER_00", "SPEAKER_01"])
+
+    return pipeline
+
+
+class TestRunPyannoteSteps:
+    @patch.dict("sys.modules", {
+        "pyannote": MagicMock(),
+        "pyannote.core": MagicMock(),
+        "pyannote.audio": MagicMock(),
+        "pyannote.audio.utils": MagicMock(),
+        "pyannote.audio.utils.signal": MagicMock(),
+    })
+    def test_caches_segmentation(self, tmp_path):
+        """Step 1 should save segmentation.npy on first run."""
+        pipeline = _make_mock_pipeline()
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path.touch()
+
+        _run_pyannote_steps(config, data, pipeline)
+
+        seg_npy = tmp_path / "diarization_segmentation.npy"
+        seg_meta = tmp_path / "diarization_segmentation_meta.json"
+        emb_npy = tmp_path / "diarization_embeddings.npy"
+        assert seg_npy.exists()
+        assert seg_meta.exists()
+        assert emb_npy.exists()
+        # Verify segmentation metadata
+        with open(seg_meta) as f:
+            meta = json.load(f)
+        assert "start" in meta and "duration" in meta and "step" in meta
+
+    @patch.dict("sys.modules", {
+        "pyannote": MagicMock(),
+        "pyannote.core": MagicMock(),
+        "pyannote.audio": MagicMock(),
+        "pyannote.audio.utils": MagicMock(),
+        "pyannote.audio.utils.signal": MagicMock(),
+    })
+    def test_reuses_cached_segmentation(self, tmp_path):
+        """Step 1 should skip if segmentation.npy is newer than audio."""
+        import time
+
+        pipeline = _make_mock_pipeline()
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path.touch()
+
+        time.sleep(0.05)
+
+        # Pre-create cached segmentation (newer than audio)
+        seg_data = np.random.rand(10, 50, 3).astype(np.float32)
+        seg_npy = tmp_path / "diarization_segmentation.npy"
+        np.save(seg_npy, seg_data)
+        seg_meta = tmp_path / "diarization_segmentation_meta.json"
+        with open(seg_meta, 'w') as f:
+            json.dump({"start": 0.0, "duration": 5.0, "step": 0.5}, f)
+
+        _run_pyannote_steps(config, data, pipeline)
+
+        # get_segmentations should NOT have been called
+        pipeline.get_segmentations.assert_not_called()
+
+    @patch.dict("sys.modules", {
+        "pyannote": MagicMock(),
+        "pyannote.core": MagicMock(),
+        "pyannote.audio": MagicMock(),
+        "pyannote.audio.utils": MagicMock(),
+        "pyannote.audio.utils.signal": MagicMock(),
+    })
+    def test_reuses_cached_embeddings(self, tmp_path):
+        """Step 4 should skip if embeddings.npy is newer than segmentation.npy."""
+        import time
+
+        pipeline = _make_mock_pipeline()
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path.touch()
+
+        time.sleep(0.05)
+
+        # Pre-create cached segmentation (newer than audio)
+        seg_npy = tmp_path / "diarization_segmentation.npy"
+        np.save(seg_npy, np.random.rand(10, 50, 3).astype(np.float32))
+        seg_meta = tmp_path / "diarization_segmentation_meta.json"
+        with open(seg_meta, 'w') as f:
+            json.dump({"start": 0.0, "duration": 5.0, "step": 0.5}, f)
+
+        time.sleep(0.05)
+
+        # Pre-create cached embeddings (newer than segmentation)
+        emb_npy = tmp_path / "diarization_embeddings.npy"
+        np.save(emb_npy, np.random.rand(10, 3, 192).astype(np.float32))
+
+        _run_pyannote_steps(config, data, pipeline)
+
+        # get_embeddings should NOT have been called
+        pipeline.get_embeddings.assert_not_called()
+
+    @patch.dict("sys.modules", {
+        "pyannote": MagicMock(),
+        "pyannote.core": MagicMock(),
+        "pyannote.audio": MagicMock(),
+        "pyannote.audio.utils": MagicMock(),
+        "pyannote.audio.utils.signal": MagicMock(),
+    })
+    def test_stale_cache_reruns(self, tmp_path):
+        """If audio is newer than cache, re-run the step."""
+        import time
+
+        pipeline = _make_mock_pipeline()
+        config = SpeechConfig(url="test", output_dir=tmp_path)
+        data = SpeechData()
+
+        # Pre-create old cache
+        seg_npy = tmp_path / "diarization_segmentation.npy"
+        np.save(seg_npy, np.random.rand(10, 50, 3).astype(np.float32))
+        seg_meta = tmp_path / "diarization_segmentation_meta.json"
+        with open(seg_meta, 'w') as f:
+            json.dump({"start": 0.0, "duration": 5.0, "step": 0.5}, f)
+
+        time.sleep(0.05)
+
+        # Create audio AFTER cache (makes cache stale)
+        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path.touch()
+
+        _run_pyannote_steps(config, data, pipeline)
+
+        # Segmentation should have been re-run since cache is stale
+        pipeline.get_segmentations.assert_called_once()
+
+
