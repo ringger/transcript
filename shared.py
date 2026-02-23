@@ -37,6 +37,9 @@ class SpeechConfig:
     no_slides: bool = False  # Skip slide extraction entirely
     podcast: bool = False  # Podcast mode: audio-only, skip video + captions
     external_transcript: Optional[str] = None  # External transcript file path or URL to include in merge
+    diarize: bool = False  # Enable speaker diarization via pyannote
+    num_speakers: Optional[int] = None  # Exact speaker count hint for diarization
+    speaker_names: Optional[list] = None  # Manual speaker name mapping (ordered by first appearance)
     dry_run: bool = False  # Show what would be done without doing it
     verbose: bool = False
     # Merge tuning
@@ -69,6 +72,7 @@ class SpeechData:
     slide_metadata: list = field(default_factory=list)
     slide_timestamps: list = field(default_factory=list)  # When each slide appears
     transcript_segments: list = field(default_factory=list)  # Segments with timestamps
+    diarization_path: Optional[Path] = None  # Diarized structured transcript
 
 
 def is_up_to_date(output: Path, *inputs: Path) -> bool:
@@ -283,6 +287,8 @@ def _collect_source_paths(config: SpeechConfig, data: SpeechData,
         ext_path = Path(config.external_transcript)
         if ext_path.exists():
             paths.append(ext_path)
+    if data.diarization_path and data.diarization_path.exists():
+        paths.append(data.diarization_path)
     return paths
 
 

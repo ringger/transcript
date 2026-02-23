@@ -18,20 +18,21 @@ from shared import (
 )
 
 
-def download_media(config: SpeechConfig, data: SpeechData) -> None:
+def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) -> None:
     """Download audio, video, and captions using yt-dlp."""
     print("\n[1/5] Downloading media...")
 
     output_template = str(config.output_dir / "%(title)s.%(ext)s")
 
-    # Get video info first to extract title
-    print("  Fetching video info...")
-    result = run_command(
-        ["yt-dlp", "--dump-json", config.url],
-        "fetching video info",
-        config.verbose
-    )
-    info = json.loads(result.stdout)
+    # Get video info first to extract title (skip if pre-fetched)
+    if info is None:
+        print("  Fetching video info...")
+        result = run_command(
+            ["yt-dlp", "--dump-json", config.url],
+            "fetching video info",
+            config.verbose
+        )
+        info = json.loads(result.stdout)
     data.title = info.get("title", "speech")
 
     print(f"  Title: {data.title}")

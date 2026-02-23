@@ -79,11 +79,14 @@ def _generate_interleaved_markdown(data: SpeechData) -> str:
 
     # Add transcript segments
     for seg in data.transcript_segments:
-        events.append({
+        event = {
             "type": "text",
             "timestamp": seg["start"],
-            "content": seg["text"]
-        })
+            "content": seg["text"],
+        }
+        if seg.get("speaker"):
+            event["speaker"] = seg["speaker"]
+        events.append(event)
 
     # Add slides
     for slide_info in data.slide_timestamps:
@@ -109,21 +112,34 @@ def _generate_interleaved_markdown(data: SpeechData) -> str:
     # Sort all events by timestamp
     events.sort(key=lambda x: x["timestamp"])
 
-    # Group consecutive text segments into paragraphs
+    # Group consecutive text segments into paragraphs by speaker
     current_paragraph = []
+    current_speaker = None
     last_slide_time = -1
+
+    def _flush_paragraph():
+        if not current_paragraph:
+            return
+        if current_speaker:
+            lines.append(f"**{current_speaker}**")
+            lines.append("")
+        paragraph_text = " ".join(current_paragraph)
+        lines.append(_format_paragraph(paragraph_text))
+        lines.append("")
 
     for event in events:
         if event["type"] == "text":
+            speaker = event.get("speaker")
+            if speaker != current_speaker and current_paragraph:
+                _flush_paragraph()
+                current_paragraph = []
+            current_speaker = speaker
             current_paragraph.append(event["content"])
         elif event["type"] == "slide":
             # Flush current paragraph before slide
-            if current_paragraph:
-                paragraph_text = " ".join(current_paragraph)
-                # Break into sentences for readability
-                lines.append(_format_paragraph(paragraph_text))
-                lines.append("")
-                current_paragraph = []
+            _flush_paragraph()
+            current_paragraph = []
+            current_speaker = None
 
             # Add slide
             lines.append(f"![{event['alt_text']}](slides/{event['filename']})")
@@ -131,10 +147,7 @@ def _generate_interleaved_markdown(data: SpeechData) -> str:
             last_slide_time = event["timestamp"]
 
     # Flush remaining paragraph
-    if current_paragraph:
-        paragraph_text = " ".join(current_paragraph)
-        lines.append(_format_paragraph(paragraph_text))
-        lines.append("")
+    _flush_paragraph()
 
     # Add footer
     lines.extend([

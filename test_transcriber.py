@@ -12,11 +12,34 @@ from download import clean_vtt_captions
 from output import generate_markdown
 from transcriber import (
     _load_external_transcript,
+    _slugify_title,
     _strip_structured_headers,
     analyze_source_survival,
     estimate_api_cost,
     merge_transcript_sources,
 )
+
+
+# ---------------------------------------------------------------------------
+# _slugify_title
+# ---------------------------------------------------------------------------
+
+class TestSlugifyTitle:
+    def test_basic(self):
+        assert _slugify_title("Hello World") == "hello-world"
+
+    def test_strips_special_chars(self):
+        assert _slugify_title("Anthropic's Chief on A.I.: 'We Don't Know'") == "anthropics-chief-on-ai-we-dont-know"
+
+    def test_truncates_long_titles(self):
+        result = _slugify_title("A" * 100)
+        assert len(result) <= 50
+
+    def test_empty_title(self):
+        assert _slugify_title("") == ""
+
+    def test_preserves_hyphens(self):
+        assert _slugify_title("two-part title") == "two-part-title"
 
 
 # ---------------------------------------------------------------------------

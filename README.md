@@ -16,6 +16,7 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 - **Checkpoint resumption**: Long merge operations save per-chunk checkpoints, resuming from where they left off after interruption
 - **Cost estimation**: Shows estimated API costs before running (`--dry-run` for estimation only)
 - **Local-first LLM**: Uses Ollama by default for free, local operation — no API key needed
+- **Speaker diarization**: Identifies who is speaking using pyannote.audio, with automatic or manual speaker naming
 - **Whisper-only mode**: `--no-llm` to skip all LLM features and run Whisper only
 
 ## Installation
@@ -63,6 +64,20 @@ python transcriber.py "https://youtube.com/watch?v=..." --no-llm
 # Podcast episode — audio only, no video or captions
 python transcriber.py --podcast "https://www.iheart.com/podcast/.../episode/..."
 python transcriber.py --podcast "https://podcasts.apple.com/us/podcast/..."
+```
+
+### Speaker Diarization
+
+```bash
+# Identify who is speaking (requires pyannote.audio and HF_TOKEN)
+pip install pyannote.audio
+export HF_TOKEN="hf_..."  # HuggingFace token with pyannote model access
+
+# Auto-detect speaker names from introductions
+python transcriber.py --diarize --num-speakers 2 --podcast "https://..."
+
+# Manual speaker names (in order of first appearance)
+python transcriber.py --diarize --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
 ```
 
 ### Speech-Only (No Slides)
@@ -121,6 +136,8 @@ output_dir/
 ├── medium.txt                    # Whisper medium transcript
 ├── ensembled.txt                 # Ensembled from multiple Whisper models
 ├── medium.json                   # Transcript with timestamps
+├── diarization.json              # Speaker segments (if --diarize)
+├── diarized.txt                  # Speaker-labeled transcript (if --diarize)
 ├── transcript_merged.txt         # Critical text (merged from all sources)
 ├── analysis.md                   # Source survival analysis
 ├── transcript.md                 # Final markdown output
@@ -141,6 +158,7 @@ output_dir/
 |-------|------|--------------|
 | 1. Download media | yt-dlp | No |
 | 2. Transcribe audio | mlx-whisper | No |
+| 2b. Speaker diarization | pyannote.audio | Optional (for names) |
 | 3. Extract slides | ffmpeg | No |
 | 4a. Ensemble Whisper models | LLM + wdiff | Yes (local or API) |
 | 4b. Merge transcript sources | LLM + wdiff | Yes (local or API) |
@@ -267,4 +285,5 @@ MIT
 - [MLX Whisper](https://github.com/ml-explore/mlx-examples) — Apple Silicon optimization
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — Media downloading
 - [Anthropic Claude](https://www.anthropic.com/) — LLM-based adjudication and vision analysis
+- [pyannote.audio](https://github.com/pyannote/pyannote-audio) — Speaker diarization
 - [wdiff](https://www.gnu.org/software/wdiff/) — Word-level diff for alignment and comparison

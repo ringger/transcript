@@ -85,11 +85,13 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
         # mlx_whisper outputs to input filename, so we need to work around this
         # Run transcription
         for fmt in ["txt", "json"]:
-            run_command(
-                ["mlx_whisper", str(data.audio_path),
-                 "--model", model_name,
-                 "--output-format", fmt,
-                 "--output-dir", str(config.output_dir)],
+            cmd = ["mlx_whisper", str(data.audio_path),
+                   "--model", model_name,
+                   "--output-format", fmt,
+                   "--output-dir", str(config.output_dir)]
+            if config.diarize:
+                cmd.extend(["--word-timestamps", "True"])
+            run_command(cmd,
                 f"transcribing with mlx-whisper {model} ({fmt})",
                 config.verbose
             )
@@ -324,15 +326,27 @@ def _load_transcript_segments(data: SpeechData) -> None:
             transcript_data = json.load(f)
 
         segments = transcript_data.get("segments", [])
-        data.transcript_segments = [
-            {
+        data.transcript_segments = []
+        for seg in segments:
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+            entry = {
                 "start": seg.get("start", 0),
                 "end": seg.get("end", 0),
-                "text": seg.get("text", "").strip()
+                "text": text,
             }
-            for seg in segments
-            if seg.get("text", "").strip()
-        ]
+            # Extract per-word timestamps when available (mlx-whisper --word-timestamps True)
+            if seg.get("words"):
+                entry["words"] = [
+                    {
+                        "word": w.get("word", ""),
+                        "start": w.get("start", 0),
+                        "end": w.get("end", 0),
+                    }
+                    for w in seg["words"]
+                ]
+            data.transcript_segments.append(entry)
         print(f"  Loaded {len(data.transcript_segments)} transcript segments with timestamps")
     except (json.JSONDecodeError, KeyError) as e:
         print(f"  Warning: Could not parse transcript JSON: {e}")

@@ -81,6 +81,7 @@ from download import download_media, clean_vtt_captions
 from transcription import transcribe_audio
 from slides import extract_slides, analyze_slides_with_vision, create_basic_slides_json
 from output import generate_markdown
+from diarization import diarize_audio
 
 # Merge logic
 from merge import (
@@ -93,6 +94,22 @@ from merge import (
     _merge_multi_source,
     _wdiff_stats,
 )
+
+
+def _slugify_title(title: str, max_len: int = 50) -> str:
+    """Convert a title to a filesystem-safe slug."""
+    safe = re.sub(r'[^\w\s-]', '', title)[:max_len].strip()
+    return re.sub(r'\s+', '-', safe).lower()
+
+
+def _fetch_metadata(url: str, verbose: bool = False) -> dict:
+    """Fetch video/audio metadata via yt-dlp without downloading."""
+    result = run_command(
+        ["yt-dlp", "--dump-json", url],
+        "fetching media info",
+        verbose,
+    )
+    return json.loads(result.stdout)
 
 
 def _load_external_transcript(config: SpeechConfig) -> tuple:
@@ -231,8 +248,11 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
         print("  No Whisper transcript or external transcript available, skipping merge")
         return
 
-    if not has_captions and not external_text:
-        print("  No YouTube captions or external transcript available, skipping merge")
+    # Use diarized transcript as a structured source when available
+    has_diarized = data.diarization_path and data.diarization_path.exists()
+
+    if not has_captions and not external_text and not has_diarized:
+        print("  No YouTube captions, external transcript, or diarization available, skipping merge")
         return
 
     merged_path = config.output_dir / "transcript_merged.txt"
@@ -265,23 +285,32 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     if external_text:
         sources.append(("External Transcript", "additional reference source provided by user", external_text))
 
+    # Load diarized transcript if available (use as structural skeleton)
+    diarized_text = None
+    if has_diarized and not external_text:
+        with open(data.diarization_path, 'r') as f:
+            diarized_text = f.read()
+        print(f"  Diarized transcript: {len(diarized_text.split())} words")
+
     print(f"  Merging {len(sources)} sources: {', '.join(s[0] for s in sources)}")
 
-    if len(sources) < 2:
+    if len(sources) < 2 and not diarized_text:
         print("  Need at least 2 sources to merge, skipping")
         return
 
-    # Check if external transcript has structure (speaker labels, timestamps)
+    # Check if external transcript or diarized transcript has structure
     structure = None
-    if external_text:
-        structure = _detect_transcript_structure(external_text)
+    structured_text = external_text or diarized_text
+    if structured_text:
+        structure = _detect_transcript_structure(structured_text)
+        struct_label = "diarized" if diarized_text and not external_text else "external"
         if structure["has_speakers"]:
-            print(f"  Detected structured external transcript (format: {structure['format']}, "
+            print(f"  Detected structured {struct_label} transcript (format: {structure['format']}, "
                   f"speakers: {structure['has_speakers']}, timestamps: {structure['has_timestamps']})")
 
-    # Route to structured merge if external has speaker labels
+    # Route to structured merge if we have speaker labels
     if structure and structure["has_speakers"]:
-        skeleton_segments = _parse_structured_transcript(external_text, structure["format"])
+        skeleton_segments = _parse_structured_transcript(structured_text, structure["format"])
         print(f"  Parsed {len(skeleton_segments)} segments from external transcript")
 
         # Pass all sources — text is treated equally, structure comes from skeleton
@@ -485,6 +514,16 @@ Examples:
     llm_group.add_argument("--no-merge", action="store_true",
                         help="Skip merging YouTube captions with Whisper (merge is on by default)")
 
+    # Diarization
+    diarize_group = parser.add_argument_group("diarization")
+    diarize_group.add_argument("--diarize", action="store_true",
+                        help="Enable speaker diarization via pyannote (requires pyannote.audio and HF_TOKEN)")
+    diarize_group.add_argument("--num-speakers", type=int, default=None,
+                        help="Exact number of speakers (improves diarization accuracy)")
+    diarize_group.add_argument("--speaker-names",
+                        help="Comma-separated speaker names in order of first appearance "
+                             "(e.g., 'Ross Douthat,Dario Amodei')")
+
     # Pipeline control
     pipeline_group = parser.add_argument_group("pipeline")
     pipeline_group.add_argument("--force", action="store_true",
@@ -519,11 +558,19 @@ Examples:
     print(f"  ffmpeg: OK")
     print(f"  whisper: OK ({whisper_impl})")
 
-    # Setup output directory
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
+    # Fetch metadata early to resolve output directory from title
+    media_info = None
+    if not args.output_dir:
+        try:
+            print("\nFetching media info...")
+            media_info = _fetch_metadata(args.url, args.verbose)
+            title = media_info.get("title", "speech")
+            slug = _slugify_title(title)
+            output_dir = Path(f"./transcripts/{slug}")
+        except Exception:
+            output_dir = Path("./transcripts/speech")
     else:
-        output_dir = Path("./transcripts/speech")
+        output_dir = Path(args.output_dir)
 
     if not args.dry_run:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -554,6 +601,9 @@ Examples:
         analyze_slides=args.analyze_slides,
         merge_sources=not args.no_merge,
         external_transcript=args.external_transcript,
+        diarize=args.diarize,
+        num_speakers=args.num_speakers,
+        speaker_names=[n.strip() for n in args.speaker_names.split(",")] if args.speaker_names else None,
         no_llm=args.no_llm,
         local=not use_api,
         local_model=args.local_model,
@@ -612,23 +662,14 @@ Examples:
     print(f"\nProcessing: {args.url}")
     print(f"Output directory: {output_dir}")
 
-    # Fetch video duration for cost estimation
+    # Use pre-fetched metadata for cost estimation
     estimated_words = 6000  # fallback
-    try:
-        info_result = run_command(
-            ["yt-dlp", "--dump-json", config.url],
-            "fetching video info for cost estimate",
-            config.verbose
-        )
-        video_info = json.loads(info_result.stdout)
-        duration_secs = video_info.get("duration", 0)
+    if media_info:
+        duration_secs = media_info.get("duration", 0)
         if duration_secs:
-            # ~2.5 words/second is typical conversational speech
             estimated_words = int(duration_secs * 2.5)
             duration_min = duration_secs / 60
             print(f"  Duration: {duration_min:.0f} min → ~{estimated_words:,} words estimated")
-    except Exception:
-        pass  # Fall back to default estimate
 
     # Print cost estimate if using cloud API
     if llm_features_requested and not config.no_llm and not config.local:
@@ -641,25 +682,12 @@ Examples:
 
     try:
         # Run pipeline — each stage skips if output already exists
-        download_media(config, data)
-
-        # Update output dir with actual title
-        if data.title and not args.output_dir and not config.dry_run:
-            safe_title = re.sub(r'[^\w\s-]', '', data.title)[:50].strip()
-            safe_title = re.sub(r'\s+', '-', safe_title).lower()
-            new_output_dir = Path(f"./transcripts/{safe_title}")
-            if output_dir != new_output_dir and not new_output_dir.exists():
-                output_dir.rename(new_output_dir)
-                config.output_dir = new_output_dir
-                # Update paths in data
-                if data.audio_path:
-                    data.audio_path = new_output_dir / data.audio_path.name
-                if data.video_path:
-                    data.video_path = new_output_dir / data.video_path.name
-                if data.captions_path:
-                    data.captions_path = new_output_dir / data.captions_path.name
+        download_media(config, data, info=media_info)
 
         transcribe_audio(config, data)
+
+        if config.diarize:
+            diarize_audio(config, data)
 
         if not config.no_slides:
             extract_slides(config, data)
@@ -697,6 +725,8 @@ Examples:
             print(f"  - {data.transcript_path.name} ({label})")
         if data.transcript_json_path and data.transcript_json_path.exists():
             print(f"  - {data.transcript_json_path.name} (transcript with timestamps)")
+        if data.diarization_path and data.diarization_path.exists():
+            print(f"  - {data.diarization_path.name} (diarized transcript)")
         if data.merged_transcript_path and data.merged_transcript_path.exists():
             print(f"  - {data.merged_transcript_path.name} (merged from YouTube + Whisper)")
         if data.slides_dir and data.slides_dir.exists():
