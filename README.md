@@ -13,10 +13,11 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 - **Structured transcript preservation**: When external transcripts have speaker labels and timestamps, the merged output preserves that structure
 - **Slide extraction and analysis**: Automatic scene detection for presentation slides, with optional vision API descriptions
 - **Make-style DAG pipeline**: Each stage checks whether its outputs are newer than its inputs, skipping unnecessary work
-- **Checkpoint resumption**: Long merge operations save per-chunk checkpoints, resuming from where they left off after interruption
+- **Checkpoint resumption**: Long operations save checkpoints and resume after interruption — merge chunks, diarization segmentation, and embedding extraction all checkpoint independently
 - **Cost estimation**: Shows estimated API costs before running (`--dry-run` for estimation only)
 - **Local-first LLM**: Uses Ollama by default for free, local operation — no API key needed
-- **Speaker diarization**: Identifies who is speaking using pyannote.audio, with automatic or manual speaker naming
+- **Speaker diarization**: Identifies who is speaking using pyannote.audio, with automatic or manual speaker naming — LLM speaker identification uses video metadata (title, description) for correct name spellings
+- **Timestamped logging**: All pipeline output prefixed with `[HH:MM:SS]` wall-clock timestamps for log correlation during long runs
 - **Whisper-only mode**: `--no-llm` to skip all LLM features and run Whisper only
 
 ## Installation
@@ -137,6 +138,8 @@ output_dir/
 ├── ensembled.txt                 # Ensembled from multiple Whisper models
 ├── medium.json                   # Transcript with timestamps
 ├── diarization.json              # Speaker segments (if --diarize)
+├── diarization_segmentation.npy  # Cached segmentation (if --diarize)
+├── diarization_embeddings.npy    # Cached embeddings (if --diarize)
 ├── diarized.txt                  # Speaker-labeled transcript (if --diarize)
 ├── transcript_merged.txt         # Critical text (merged from all sources)
 ├── analysis.md                   # Source survival analysis
@@ -216,8 +219,10 @@ The pipeline links these by **midpoint matching**: for each word, it finds which
 
 **Speaker identification** maps generic labels to real names via three methods (in priority order):
 - `--speaker-names "Alice,Bob"` — manual mapping by order of first appearance
-- LLM-based detection — reads the first ~500 words and infers names from introductions
+- LLM-based detection — reads the first ~500 words and infers names from introductions, using video metadata (title, description, channel) for correct spellings (e.g., corrects Whisper's "Douthit" to "Douthat" when the video description contains the correct name)
 - `--no-llm` — keeps generic SPEAKER_00/SPEAKER_01 labels
+
+**Diarization checkpointing** breaks the expensive pyannote pipeline into 6 independently cached steps. Segmentation (the neural model pass, ~50% of runtime) and embedding extraction (the other slow step) both save to `.npy` files. Embeddings checkpoint every 10 batches to a partial file, enabling resume mid-extraction. If any step's output is newer than the audio file, it is skipped on re-run.
 
 ### Make-Style Staleness Checks
 
@@ -280,6 +285,16 @@ Required for alignment-based merging:
 brew install wdiff  # macOS
 apt install wdiff   # Ubuntu/Debian
 ```
+
+### Diarization fails on short audio clips
+
+pyannote's audio decoder can produce sample-count mismatches with MP3 files, especially short clips. Place a WAV version of the audio alongside the MP3:
+
+```bash
+ffmpeg -i output_dir/audio.mp3 -ar 16000 -ac 1 output_dir/audio.wav
+```
+
+The pipeline automatically prefers `audio.wav` over `audio.mp3` for diarization when both exist.
 
 ### API timeouts
 
