@@ -86,7 +86,7 @@ transcript-critic --podcast "https://podcasts.apple.com/us/podcast/..."
 
 ```bash
 # Identify who is speaking (requires pyannote.audio and HF_TOKEN)
-pip install pyannote.audio
+pip install transcript-critic[diarize]
 export HF_TOKEN="hf_..."  # HuggingFace token with pyannote model access
 
 # Auto-detect speaker names from introductions
@@ -302,8 +302,10 @@ Related work in speech:
 
 ### "No Whisper implementation found"
 
+`pip install transcript-critic` automatically installs the right Whisper for your platform (mlx-whisper on Apple Silicon, openai-whisper elsewhere). If you installed from source and see this error:
+
 ```bash
-pip install mlx-whisper    # Apple Silicon (recommended)
+pip install mlx-whisper    # Apple Silicon
 pip install openai-whisper # Other platforms
 ```
 

@@ -41,6 +41,7 @@ dev = [
 transcript-critic = "transcript_critic.transcriber:main"
 
 [project.urls]
+Homepage = "https://pypi.org/project/transcript-critic/"
 Repository = "https://github.com/ringger/transcript-critic"
 
 [tool.setuptools.packages.find]

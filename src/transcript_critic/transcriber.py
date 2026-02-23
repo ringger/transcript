@@ -13,32 +13,32 @@ Pipeline:
 5. Generate markdown with slides interleaved at correct timestamps
 
 Usage:
-    python transcriber.py <url> [options]
+    transcript-critic <url> [options]
 
 Examples:
     # Basic usage - Whisper transcript + slides
-    python transcriber.py "https://youtube.com/watch?v=..."
+    transcript-critic "https://youtube.com/watch?v=..."
 
     # Full pipeline with slide analysis
-    python transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
+    transcript-critic "https://youtube.com/watch?v=..." --analyze-slides
 
     # Skip merging YouTube captions (merge is on by default)
-    python transcriber.py "https://youtube.com/watch?v=..." --no-merge
+    transcript-critic "https://youtube.com/watch?v=..." --no-merge
 
     # Full pipeline with slide analysis (merging is automatic)
-    python transcriber.py "https://youtube.com/watch?v=..." --analyze-slides
+    transcript-critic "https://youtube.com/watch?v=..." --analyze-slides
 
     # Ensemble multiple Whisper models for better accuracy
-    python transcriber.py "https://youtube.com/watch?v=..." --whisper-models small,medium
+    transcript-critic "https://youtube.com/watch?v=..." --whisper-models small,medium
 
     # Run without any LLM (Whisper only, free)
-    python transcriber.py "https://youtube.com/watch?v=..." --no-llm
+    transcript-critic "https://youtube.com/watch?v=..." --no-llm
 
     # Use Anthropic Claude API instead of local Ollama
-    python transcriber.py "https://youtube.com/watch?v=..." --api
+    transcript-critic "https://youtube.com/watch?v=..." --api
 
     # Custom output directory and model
-    python transcriber.py "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
+    transcript-critic "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
 """
 
 import argparse
