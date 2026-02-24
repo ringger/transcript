@@ -446,11 +446,11 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
 
     # Print summary
     print()
-    print(f"  {'Source':<25} {'Words':>8} {'Common':>8} {'% of Merged':>12} {'% of Source':>12}")
-    print(f"  {'-'*25} {'-'*8} {'-'*8} {'-'*12} {'-'*12}")
+    print(f"  {'Source':<25} {'Words':>8} {'Common':>8} {'Output Coverage':>16} {'Retention':>10}")
+    print(f"  {'-'*25} {'-'*8} {'-'*8} {'-'*16} {'-'*10}")
     for r in results:
         print(f"  {r['name']:<25} {r['source_words']:>8,} {r['common_from_merged']:>8,} "
-              f"{r['common_pct_of_merged']:>11}% {r['common_pct_of_source']:>11}%")
+              f"{r['common_pct_of_merged']:>15}% {r['common_pct_of_source']:>9}%")
     print(f"  {'Merged output':<25} {merged_words:>8,}")
 
     # Find most similar source
@@ -463,21 +463,21 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     report = [f"# Source Survival Analysis", ""]
     report.append(f"Merged transcript: `{merged_path.name}` ({merged_words:,} words)")
     report.append("")
-    report.append("| Source | Words | Common | % of Merged | % of Source |")
-    report.append("|--------|------:|-------:|------------:|------------:|")
+    report.append("| Source | Words | Common | Output Coverage | Retention |")
+    report.append("|--------|------:|-------:|----------------:|----------:|")
     for r in results:
         report.append(f"| {r['name']} | {r['source_words']:,} | {r['common_from_merged']:,} "
                       f"| {r['common_pct_of_merged']}% | {r['common_pct_of_source']}% |")
     report.append(f"| **Merged output** | **{merged_words:,}** | | | |")
     report.append("")
-    report.append(f"**Most similar source:** {best['name']} ({best['common_pct_of_merged']}% of merged words in common)")
+    report.append(f"**Most similar source:** {best['name']} ({best['common_pct_of_merged']}% output coverage)")
     report.append("")
     report.append("## Column definitions")
     report.append("")
     report.append("- **Words**: word count of the source (after normalization)")
     report.append("- **Common**: words shared between merged output and this source")
-    report.append("- **% of Merged**: what percentage of the merged output's words appear in this source")
-    report.append("- **% of Source**: what percentage of this source's words appear in the merged output")
+    report.append("- **Output Coverage**: what percentage of the merged output's words appear in this source")
+    report.append("- **Retention**: what percentage of this source's words survived into the merged output")
     report.append("")
 
     with open(analysis_path, 'w') as f:

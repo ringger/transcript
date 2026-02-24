@@ -206,15 +206,18 @@ Unlike a traditional critical edition, the pipeline does not produce an apparatu
 After merging, `wdiff -s` compares each source against the merged output, showing how much each source contributed to the final text. Here is an actual survival analysis from a 3-hour podcast episode transcribed with Whisper (small + medium ensembled), YouTube auto-captions, and a human-edited external transcript:
 
 ```
-Source                       Words   Common  % of Merged  % of Source
-------------------------- -------- -------- ------------ ------------
-Whisper (ensembled)         28,277   27,441          90%          97%
-YouTube captions            30,668   28,741          94%          94%
-External transcript         33,122   30,245          99%          91%
+Source                       Words   Common  Output Coverage  Retention
+------------------------- -------- -------- --------------- ----------
+Whisper (ensembled)         28,277   27,441             90%        97%
+YouTube captions            30,668   28,741             94%        94%
+External transcript         33,122   30,245             99%        91%
 Merged output               30,524
 ```
 
-No single source matches the merged output — the merged text draws from all three. The external transcript is closest (99% of merged words present), but the merge still corrects ~1% of its content using the other sources. Whisper contributes readings not found in either captions or the external transcript, and vice versa.
+- **Output Coverage**: what percentage of the merged output's words appear in this source (how much of the final text did this source "cover"?)
+- **Retention**: what percentage of this source's words survived into the merged output
+
+No single source matches the merged output — the merged text draws from all three. The external transcript has the highest coverage (99% of merged words present), but the merge still corrects ~1% of its content using the other sources. Whisper contributes readings not found in either captions or the external transcript, and vice versa.
 
 Here are specific corrections the merge made by adjudicating across sources:
 
