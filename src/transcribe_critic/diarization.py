@@ -285,10 +285,20 @@ def _run_pyannote_steps(config, data, pipeline):
     from pyannote.core import SlidingWindow, SlidingWindowFeature
     from pyannote.audio.utils.signal import binarize
 
-    # Prefer WAV over MP3 for pyannote (MP3 decoding has sample-count rounding issues)
+    # Convert MP3 to WAV for pyannote (MP3 decoding has sample-count rounding issues)
+    # DAG: MP3 → WAV → segmentation → embeddings → clustering → reconstruction
     audio_path = data.audio_path
     wav_path = audio_path.with_suffix(".wav")
-    if wav_path.exists():
+    if audio_path.suffix.lower() == ".mp3":
+        if is_up_to_date(wav_path, audio_path):
+            print("  Reusing: audio.wav")
+        else:
+            print("  Converting MP3 to WAV for diarization (avoids sample-count rounding)...")
+            import subprocess
+            subprocess.run(
+                ["ffmpeg", "-i", str(audio_path), "-ar", "16000", "-ac", "1", str(wav_path)],
+                check=True, capture_output=True,
+            )
         audio_path = wav_path
     seg_npy = config.output_dir / "diarization_segmentation.npy"
     seg_meta = config.output_dir / "diarization_segmentation_meta.json"
@@ -343,8 +353,7 @@ def _run_pyannote_steps(config, data, pipeline):
         return Annotation(uri=file["uri"])
 
     # --- Step 4: Embeddings (expensive, ~40% of runtime) ---
-    # Embeddings depend on segmentation, not audio directly
-    if is_up_to_date(emb_npy, seg_npy):
+    if is_up_to_date(emb_npy, seg_npy) and is_up_to_date(emb_npy, audio_path):
         print("  Step 4/6: Reusing cached embeddings")
         embeddings = np.load(emb_npy)
     else:

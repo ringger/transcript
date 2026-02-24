@@ -146,6 +146,7 @@ transcribe-critic "https://youtube.com/watch?v=..." -v
 output_dir/
 ├── metadata.json                 # Source URL, title, duration, etc.
 ├── audio.mp3                     # Downloaded audio
+├── audio.wav                     # Converted for diarization (if --diarize)
 ├── video.mp4                     # Downloaded video (if slides enabled)
 ├── captions.en.vtt               # YouTube captions (if available)
 ├── small.txt                     # Whisper small transcript
@@ -323,13 +324,13 @@ apt install wdiff   # Ubuntu/Debian
 
 ### Diarization fails on short audio clips
 
-pyannote's audio decoder can produce sample-count mismatches with MP3 files, especially short clips. Place a WAV version of the audio alongside the MP3:
+pyannote's audio decoder can produce sample-count mismatches with MP3 files, especially short clips. The pipeline automatically converts MP3 to WAV before diarization, so this should be handled transparently. If you still encounter issues, you can manually provide a WAV file:
 
 ```bash
 ffmpeg -i output_dir/audio.mp3 -ar 16000 -ac 1 output_dir/audio.wav
 ```
 
-The pipeline automatically prefers `audio.wav` over `audio.mp3` for diarization when both exist.
+The pipeline will use an existing `audio.wav` over `audio.mp3` for diarization.
 
 ### API timeouts
 
