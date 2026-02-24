@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from transcript_critic.shared import SpeechConfig, is_up_to_date
+from transcribe_critic.shared import SpeechConfig, is_up_to_date
 
-from transcript_critic.merge import (
+from transcribe_critic.merge import (
     MERGE_CHECKPOINT_VERSION,
     _analyze_differences_wdiff,
     _build_alignments,
@@ -637,8 +637,8 @@ class TestCountFreshChunks:
 class TestMergeStructuredEndToEnd:
     """Test _merge_structured with real wdiff subprocess, only mocking the API."""
 
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_blind_merge_with_real_wdiff(self, mock_api, mock_client, tmp_path):
         """Full pipeline: wdiff alignment + anonymous prompting + response parsing."""
         segments = [
@@ -698,8 +698,8 @@ class TestMergeStructuredEndToEnd:
         assert result[0]["text"] == "Welcome to the podcast today"
         assert result[1]["text"] == "Thanks for having me here"
 
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_alignment_extracts_correct_segments_for_prompt(self, mock_api, mock_client, tmp_path):
         """Verify wdiff alignment produces sensible per-segment text in the prompt."""
         segments = [
@@ -759,8 +759,8 @@ class TestMergeStructuredEndToEnd:
 class TestMergeMultiSourceEndToEnd:
     """Test _merge_multi_source with real wdiff, only mocking the API."""
 
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_anonymous_prompt_no_source_names(self, mock_api, mock_client, tmp_path):
         """Source names should not appear in the prompt sent to Claude."""
         sources = [
@@ -789,8 +789,8 @@ class TestMergeMultiSourceEndToEnd:
         result = _merge_multi_source(sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_three_sources(self, mock_api, mock_client, tmp_path):
         """Flat merge with 3 sources should work with wdiff alignment."""
         text = "the quick brown fox jumps over the lazy dog " * 60
@@ -819,8 +819,8 @@ class TestMergeMultiSourceEndToEnd:
         result = _merge_multi_source(sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_checkpoint_versioning(self, mock_api, mock_client, tmp_path):
         """Flat merge should use checkpoint versioning."""
         text = "word " * 600
@@ -889,9 +889,9 @@ class TestCheckpointFileIntegrity:
             return msg
         return responder
 
-    @patch("transcript_critic.merge._build_wdiff_alignment")
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge._build_wdiff_alignment")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_each_chunk_gets_own_checkpoint(self, mock_api, mock_client, mock_align, tmp_path):
         """Verify the checkpoint_path bug fix: each chunk writes a distinct file."""
         segments, all_sources = self._make_segments_and_sources(6)
@@ -935,9 +935,9 @@ class TestCheckpointFileIntegrity:
         assert version_file.exists()
         assert version_file.read_text().strip() == MERGE_CHECKPOINT_VERSION
 
-    @patch("transcript_critic.merge._build_wdiff_alignment")
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge._build_wdiff_alignment")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_partial_resume_skips_fresh_chunks(self, mock_api, mock_client, mock_align, tmp_path):
         """Pre-existing fresh checkpoints should be loaded, not re-processed."""
         segments, all_sources = self._make_segments_and_sources(4)
@@ -975,9 +975,9 @@ class TestCheckpointFileIntegrity:
         assert result[0]["text"] == "Cached segment one."
         assert result[1]["text"] == "Cached segment two."
 
-    @patch("transcript_critic.merge._build_wdiff_alignment")
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge._build_wdiff_alignment")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_stale_checkpoint_is_reprocessed(self, mock_api, mock_client, mock_align, tmp_path):
         """A checkpoint older than a source should be re-processed via API."""
         segments, all_sources = self._make_segments_and_sources(2)
@@ -1010,9 +1010,9 @@ class TestCheckpointFileIntegrity:
         assert mock_api.call_count == 1
         assert result[0]["text"] == "Merged text for passage 1."
 
-    @patch("transcript_critic.merge._build_wdiff_alignment")
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge._build_wdiff_alignment")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_version_mismatch_clears_old_checkpoints(self, mock_api, mock_client, mock_align, tmp_path):
         """Checkpoint version mismatch should clear old chunk files."""
         segments, all_sources = self._make_segments_and_sources(2)
@@ -1302,9 +1302,9 @@ class TestChunkCheckpoints:
 class TestMergeStructuredSkeletonSourceName:
     """Test the skeleton_source_name parameter in _merge_structured."""
 
-    @patch("transcript_critic.merge._build_wdiff_alignment")
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge._build_wdiff_alignment")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_custom_skeleton_source_name(self, mock_api, mock_client, mock_align, tmp_path):
         """skeleton_source_name='Diarized Transcript' correctly identifies the anchor."""
         segments = [
@@ -1391,8 +1391,8 @@ class TestWdiffStatsEdgeCases:
 # ---------------------------------------------------------------------------
 
 class TestMergeMultiSourceEdgeCases:
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_identical_sources_no_diffs(self, mock_api, mock_client, tmp_path):
         """When sources are identical, merge should still succeed."""
         text = "the quick brown fox jumps over the lazy dog " * 60
@@ -1414,8 +1414,8 @@ class TestMergeMultiSourceEdgeCases:
         result = _merge_multi_source(sources, config, source_paths)
         assert len(result) > 0
 
-    @patch("transcript_critic.merge.create_llm_client")
-    @patch("transcript_critic.merge.llm_call_with_retry")
+    @patch("transcribe_critic.merge.create_llm_client")
+    @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_short_text_single_chunk(self, mock_api, mock_client, tmp_path):
         """Short text should produce a single chunk."""
         sources = [

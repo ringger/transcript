@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from transcript_critic.shared import (
+from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData,
     create_llm_client, llm_call_with_retry,

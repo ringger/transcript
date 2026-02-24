@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from transcript_critic.shared import SpeechConfig, SpeechData
+from transcribe_critic.shared import SpeechConfig, SpeechData
 
-from transcript_critic.output import (
+from transcribe_critic.output import (
     _format_paragraph,
     _generate_interleaved_markdown,
     _generate_sequential_markdown,

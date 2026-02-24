@@ -18,7 +18,7 @@ Thanks for your interest in contributing!
 
 ## Code Organization
 
-Source code lives in `src/transcript_critic/`:
+Source code lives in `src/transcribe_critic/`:
 
 - `shared.py` — Shared types (`SpeechConfig`, `SpeechData`) and utilities
 - `transcriber.py` — Pipeline orchestration, CLI, cost estimation, source survival analysis

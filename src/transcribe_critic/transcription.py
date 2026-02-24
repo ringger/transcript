@@ -8,14 +8,14 @@ multi-model ensembling via wdiff analysis and LLM adjudication.
 import json
 from pathlib import Path
 
-from transcript_critic.shared import (
+from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     create_llm_client, llm_call_with_retry,
     run_command, _save_json, _print_reusing, _dry_run_skip, _should_skip,
     check_dependencies, MODEL_SIZES,
 )
-from transcript_critic.merge import _analyze_differences_wdiff, _filter_meaningful_diffs
+from transcribe_critic.merge import _analyze_differences_wdiff, _filter_meaningful_diffs
 
 
 def _select_largest_model_json(data: SpeechData):

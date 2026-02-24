@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "transcript-critic"
+name = "transcribe-critic"
 version = "0.1.0"
 description = "Multi-source speech transcription with LLM-based adjudication inspired by textual criticism"
 readme = "README.md"
@@ -38,11 +38,11 @@ dev = [
 ]
 
 [project.scripts]
-transcript-critic = "transcript_critic.transcriber:main"
+transcribe-critic = "transcribe_critic.transcriber:main"
 
 [project.urls]
-Homepage = "https://pypi.org/project/transcript-critic/"
-Repository = "https://github.com/ringger/transcript-critic"
+Homepage = "https://pypi.org/project/transcribe-critic/"
+Repository = "https://github.com/ringger/transcribe-critic"
 
 [tool.setuptools.packages.find]
 where = ["src"]

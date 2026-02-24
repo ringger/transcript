@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from transcript_critic.shared import SpeechConfig, SpeechData
+from transcribe_critic.shared import SpeechConfig, SpeechData
 
-from transcript_critic.diarization import (
+from transcribe_critic.diarization import (
     _assign_speakers_to_words,
     _find_speaker_at_time,
     _format_diarized_transcript,
@@ -207,8 +207,8 @@ class TestIdentifySpeakers:
         _identify_speakers(config, data)
         assert data.transcript_segments[0]["speaker"] == "SPEAKER_00"
 
-    @patch("transcript_critic.diarization.llm_call_with_retry")
-    @patch("transcript_critic.diarization.create_llm_client")
+    @patch("transcribe_critic.diarization.llm_call_with_retry")
+    @patch("transcribe_critic.diarization.create_llm_client")
     def test_llm_identifies_speakers(self, mock_client, mock_llm):
         mock_llm.return_value = MagicMock(
             content=[MagicMock(text='{"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}')],
@@ -223,8 +223,8 @@ class TestIdentifySpeakers:
         assert data.transcript_segments[0]["speaker"] == "Alice"
         assert data.transcript_segments[1]["speaker"] == "Bob"
 
-    @patch("transcript_critic.diarization.llm_call_with_retry")
-    @patch("transcript_critic.diarization.create_llm_client")
+    @patch("transcribe_critic.diarization.llm_call_with_retry")
+    @patch("transcribe_critic.diarization.create_llm_client")
     def test_llm_uses_metadata_for_spelling(self, mock_client, mock_llm):
         """Metadata (title, description) should be included in LLM prompt."""
         mock_llm.return_value = MagicMock(
@@ -370,8 +370,8 @@ class TestDiarizeAudio:
         diarize_audio(config, data)
         assert data.diarization_path is None
 
-    @patch("transcript_critic.diarization._identify_speakers")
-    @patch("transcript_critic.diarization._run_pyannote")
+    @patch("transcribe_critic.diarization._identify_speakers")
+    @patch("transcribe_critic.diarization._run_pyannote")
     @patch.dict("sys.modules", {"pyannote": MagicMock(), "pyannote.audio": MagicMock()})
     def test_full_pipeline(self, mock_pyannote, mock_identify, tmp_path):
         mock_pyannote.return_value = [
@@ -486,7 +486,7 @@ def _make_mock_pipeline():
 
 
 class TestRunPyannoteSteps:
-    @patch("transcript_critic.diarization._get_embeddings_checkpointed")
+    @patch("transcribe_critic.diarization._get_embeddings_checkpointed")
     @patch.dict("sys.modules", {
         "pyannote": MagicMock(),
         "pyannote.core": MagicMock(),
@@ -516,7 +516,7 @@ class TestRunPyannoteSteps:
             meta = json.load(f)
         assert "start" in meta and "duration" in meta and "step" in meta
 
-    @patch("transcript_critic.diarization._get_embeddings_checkpointed")
+    @patch("transcribe_critic.diarization._get_embeddings_checkpointed")
     @patch.dict("sys.modules", {
         "pyannote": MagicMock(),
         "pyannote.core": MagicMock(),
@@ -587,7 +587,7 @@ class TestRunPyannoteSteps:
         # get_embeddings should NOT have been called
         pipeline.get_embeddings.assert_not_called()
 
-    @patch("transcript_critic.diarization._get_embeddings_checkpointed")
+    @patch("transcribe_critic.diarization._get_embeddings_checkpointed")
     @patch.dict("sys.modules", {
         "pyannote": MagicMock(),
         "pyannote.core": MagicMock(),
@@ -810,7 +810,7 @@ class TestRunPyannoteOuter:
             "pyannote": MagicMock(),
             "pyannote.audio": mock_pyannote_audio,
         }):
-            with patch("transcript_critic.diarization._run_pyannote_steps", return_value=mock_diarization):
+            with patch("transcribe_critic.diarization._run_pyannote_steps", return_value=mock_diarization):
                 with patch.object(real_torch.cuda, "is_available", return_value=cuda):
                     with patch.object(real_torch.backends.mps, "is_available", return_value=mps):
                         _run_pyannote(config, data, output_path)

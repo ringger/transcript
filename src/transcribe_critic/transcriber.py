@@ -13,32 +13,32 @@ Pipeline:
 5. Generate markdown with slides interleaved at correct timestamps
 
 Usage:
-    transcript-critic <url> [options]
+    transcribe-critic <url> [options]
 
 Examples:
     # Basic usage - Whisper transcript + slides
-    transcript-critic "https://youtube.com/watch?v=..."
+    transcribe-critic "https://youtube.com/watch?v=..."
 
     # Full pipeline with slide analysis
-    transcript-critic "https://youtube.com/watch?v=..." --analyze-slides
+    transcribe-critic "https://youtube.com/watch?v=..." --analyze-slides
 
     # Skip merging YouTube captions (merge is on by default)
-    transcript-critic "https://youtube.com/watch?v=..." --no-merge
+    transcribe-critic "https://youtube.com/watch?v=..." --no-merge
 
     # Full pipeline with slide analysis (merging is automatic)
-    transcript-critic "https://youtube.com/watch?v=..." --analyze-slides
+    transcribe-critic "https://youtube.com/watch?v=..." --analyze-slides
 
     # Ensemble multiple Whisper models for better accuracy
-    transcript-critic "https://youtube.com/watch?v=..." --whisper-models small,medium
+    transcribe-critic "https://youtube.com/watch?v=..." --whisper-models small,medium
 
     # Run without any LLM (Whisper only, free)
-    transcript-critic "https://youtube.com/watch?v=..." --no-llm
+    transcribe-critic "https://youtube.com/watch?v=..." --no-llm
 
     # Use Anthropic Claude API instead of local Ollama
-    transcript-critic "https://youtube.com/watch?v=..." --api
+    transcribe-critic "https://youtube.com/watch?v=..." --api
 
     # Custom output directory and model
-    transcript-critic "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
+    transcribe-critic "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
 """
 
 import argparse
@@ -48,8 +48,8 @@ import re
 import sys
 from pathlib import Path
 
-from transcript_critic import __version__
-from transcript_critic.shared import (
+from transcribe_critic import __version__
+from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
     run_command, _print_reusing, _dry_run_skip, _should_skip,
@@ -79,14 +79,14 @@ def _get_model_pricing(model_name: str) -> dict:
     return DEFAULT_PRICING
 
 # Pipeline stage modules
-from transcript_critic.download import download_media, clean_vtt_captions
-from transcript_critic.transcription import transcribe_audio
-from transcript_critic.slides import extract_slides, analyze_slides_with_vision, create_basic_slides_json
-from transcript_critic.output import generate_markdown
-from transcript_critic.diarization import diarize_audio
+from transcribe_critic.download import download_media, clean_vtt_captions
+from transcribe_critic.transcription import transcribe_audio
+from transcribe_critic.slides import extract_slides, analyze_slides_with_vision, create_basic_slides_json
+from transcribe_critic.output import generate_markdown
+from transcribe_critic.diarization import diarize_audio
 
 # Merge logic
-from transcript_critic.merge import (
+from transcribe_critic.merge import (
     _extract_text_from_html,
     _normalize_for_comparison,
     _detect_transcript_structure,
@@ -488,7 +488,7 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="transcript-critic",
+        prog="transcribe-critic",
         description="Transcribe speeches from video URLs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

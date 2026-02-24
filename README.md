@@ -1,4 +1,4 @@
-# Transcript Critic
+# Transcribe Critic
 
 Automated pipeline for producing accurate speech transcripts from video URLs. Downloads media, transcribes with multiple Whisper models, and merges all available sources — Whisper, YouTube captions, and optional external transcripts — into a single "critical text" using LLM-based adjudication.
 
@@ -6,7 +6,7 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 
 ## How is this different from WhisperX?
 
-[WhisperX](https://github.com/m-bain/whisperX) improves a single Whisper run with voice-activity-detection (VAD) chunking, word-level timestamps, and speaker diarization — but the transcript still comes from one model pass. Transcript Critic takes a different approach: it runs multiple Whisper models, pulls in YouTube captions and external human-edited transcripts, and treats them all as independent witnesses. An LLM then adjudicates every disagreement blindly, without knowing which source produced which reading. The result is a merged "critical text" that is more accurate than any single source. If you just need fast, well-segmented Whisper output, WhisperX is the right tool; if you want the most accurate transcript possible from multiple sources, this is.
+[WhisperX](https://github.com/m-bain/whisperX) improves a single Whisper run with voice-activity-detection (VAD) chunking, word-level timestamps, and speaker diarization — but the transcript still comes from one model pass. Transcribe Critic takes a different approach: it runs multiple Whisper models, pulls in YouTube captions and external human-edited transcripts, and treats them all as independent witnesses. An LLM then adjudicates every disagreement blindly, without knowing which source produced which reading. The result is a merged "critical text" that is more accurate than any single source. If you just need fast, well-segmented Whisper output, WhisperX is the right tool; if you want the most accurate transcript possible from multiple sources, this is.
 
 ## Features
 
@@ -27,7 +27,7 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 ## Installation
 
 ```bash
-pip install transcript-critic
+pip install transcribe-critic
 ```
 
 ### System Dependencies
@@ -48,8 +48,8 @@ ollama pull qwen2.5
 ### From Source
 
 ```bash
-git clone https://github.com/ringger/transcript-critic.git
-cd transcript-critic
+git clone https://github.com/ringger/transcribe-critic.git
+cd transcribe-critic
 pip install -e .          # editable install
 pip install -e .[dev]     # with test dependencies
 pip install -e .[diarize] # with speaker diarization
@@ -59,17 +59,17 @@ pip install -e .[diarize] # with speaker diarization
 
 ```bash
 # Basic: Whisper transcription + local LLM merge (free, uses Ollama)
-transcript-critic "https://youtube.com/watch?v=..."
+transcribe-critic "https://youtube.com/watch?v=..."
 
 # With an external human-edited transcript for three-way merge
-transcript-critic "https://youtube.com/watch?v=..." \
+transcribe-critic "https://youtube.com/watch?v=..." \
     --external-transcript "https://example.com/transcript"
 
 # Use Anthropic Claude API instead of local Ollama (higher quality, costs money)
-transcript-critic "https://youtube.com/watch?v=..." --api
+transcribe-critic "https://youtube.com/watch?v=..." --api
 
 # Whisper only — no LLM merging at all
-transcript-critic "https://youtube.com/watch?v=..." --no-llm
+transcribe-critic "https://youtube.com/watch?v=..." --no-llm
 ```
 
 ## Usage Examples
@@ -78,32 +78,32 @@ transcript-critic "https://youtube.com/watch?v=..." --no-llm
 
 ```bash
 # Podcast episode — audio only, no video or captions
-transcript-critic --podcast "https://www.iheart.com/podcast/.../episode/..."
-transcript-critic --podcast "https://podcasts.apple.com/us/podcast/..."
+transcribe-critic --podcast "https://www.iheart.com/podcast/.../episode/..."
+transcribe-critic --podcast "https://podcasts.apple.com/us/podcast/..."
 ```
 
 ### Speaker Diarization
 
 ```bash
 # Identify who is speaking (requires pyannote.audio and HF_TOKEN)
-pip install transcript-critic[diarize]
+pip install transcribe-critic[diarize]
 export HF_TOKEN="hf_..."  # HuggingFace token with pyannote model access
 
 # Auto-detect speaker names from introductions
-transcript-critic --diarize --num-speakers 2 --podcast "https://..."
+transcribe-critic --diarize --num-speakers 2 --podcast "https://..."
 
 # Manual speaker names (in order of first appearance)
-transcript-critic --diarize --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
+transcribe-critic --diarize --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
 ```
 
 ### Speech-Only (No Slides)
 
 ```bash
 # YouTube talk or interview — skip slide extraction
-transcript-critic "https://youtube.com/watch?v=..." --no-slides
+transcribe-critic "https://youtube.com/watch?v=..." --no-slides
 
 # With external transcript for higher accuracy
-transcript-critic "https://youtube.com/watch?v=..." \
+transcribe-critic "https://youtube.com/watch?v=..." \
     --no-slides \
     --external-transcript "https://example.com/transcript"
 ```
@@ -112,32 +112,32 @@ transcript-critic "https://youtube.com/watch?v=..." \
 
 ```bash
 # Extract slides and interleave with transcript
-transcript-critic "https://youtube.com/watch?v=..."
+transcribe-critic "https://youtube.com/watch?v=..."
 
 # Also describe slide content with vision API
-transcript-critic "https://youtube.com/watch?v=..." --analyze-slides
+transcribe-critic "https://youtube.com/watch?v=..." --analyze-slides
 ```
 
 ### Custom Options
 
 ```bash
 # Custom output directory
-transcript-critic "https://youtube.com/watch?v=..." -o ./my_transcript
+transcribe-critic "https://youtube.com/watch?v=..." -o ./my_transcript
 
 # Use specific Whisper models
-transcript-critic "https://youtube.com/watch?v=..." --whisper-models large
+transcribe-critic "https://youtube.com/watch?v=..." --whisper-models large
 
 # Use a different local model
-transcript-critic "https://youtube.com/watch?v=..." --local-model llama3.3
+transcribe-critic "https://youtube.com/watch?v=..." --local-model llama3.3
 
 # Adjust slide detection sensitivity (0.0–1.0, lower = more slides)
-transcript-critic "https://youtube.com/watch?v=..." --scene-threshold 0.15
+transcribe-critic "https://youtube.com/watch?v=..." --scene-threshold 0.15
 
 # Force re-processing (ignore existing files)
-transcript-critic "https://youtube.com/watch?v=..." --force
+transcribe-critic "https://youtube.com/watch?v=..." --force
 
 # Verbose output
-transcript-critic "https://youtube.com/watch?v=..." -v
+transcribe-critic "https://youtube.com/watch?v=..." -v
 ```
 
 ## Output Files
@@ -302,7 +302,7 @@ Related work in speech:
 
 ### "No Whisper implementation found"
 
-`pip install transcript-critic` automatically installs the right Whisper for your platform (mlx-whisper on Apple Silicon, openai-whisper elsewhere). If you installed from source and see this error:
+`pip install transcribe-critic` automatically installs the right Whisper for your platform (mlx-whisper on Apple Silicon, openai-whisper elsewhere). If you installed from source and see this error:
 
 ```bash
 pip install mlx-whisper    # Apple Silicon
@@ -335,8 +335,8 @@ The tool retries on timeouts (120s per attempt, up to 5 retries with exponential
 ### ffmpeg scene detection captures too few/many slides
 
 ```bash
-transcript-critic "..." --scene-threshold 0.05  # More slides
-transcript-critic "..." --scene-threshold 0.20  # Fewer slides
+transcribe-critic "..." --scene-threshold 0.05  # More slides
+transcribe-critic "..." --scene-threshold 0.20  # Fewer slides
 ```
 
 ## License

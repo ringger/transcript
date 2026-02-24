@@ -9,7 +9,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from transcript_critic.shared import (
+from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData,
     run_command, _save_json, _print_reusing, _dry_run_skip,
