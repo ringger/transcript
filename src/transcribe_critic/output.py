@@ -11,6 +11,7 @@ from pathlib import Path
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
+    TRANSCRIPT_MD, SLIDE_TIMESTAMPS_JSON,
     _print_reusing, _dry_run_skip, _should_skip,
 )
 
@@ -20,12 +21,12 @@ def generate_markdown(config: SpeechConfig, data: SpeechData) -> None:
     print()
     print("[5] Generating markdown...")
 
-    markdown_path = config.output_dir / "transcript.md"
+    markdown_path = config.output_dir / TRANSCRIPT_MD
 
     # Inputs: merged or whisper transcript, slide timestamps, slides JSON
     md_inputs = [p for p in [data.merged_transcript_path, data.transcript_path,
                              data.slides_json_path] if p]
-    timestamps_file = config.output_dir / "slide_timestamps.json"
+    timestamps_file = config.output_dir / SLIDE_TIMESTAMPS_JSON
     if timestamps_file.exists():
         md_inputs.append(timestamps_file)
     if _should_skip(config, markdown_path, "generate markdown", *md_inputs):

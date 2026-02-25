@@ -6,16 +6,20 @@ multi-model ensembling via wdiff analysis and LLM adjudication.
 """
 
 import json
+import re
 from pathlib import Path
 
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
+    WHISPER_MERGED_TXT,
     create_llm_client, llm_call_with_retry,
     run_command, _save_json, _print_reusing, _dry_run_skip, _should_skip,
     check_dependencies, MODEL_SIZES,
 )
-from transcribe_critic.merge import _analyze_differences_wdiff, _filter_meaningful_diffs
+from transcribe_critic.merge import (
+    _normalize_for_comparison, _write_temp_text, _parse_wdiff_tokens,
+)
 
 
 def _select_largest_model_json(data: SpeechData):
@@ -24,6 +28,416 @@ def _select_largest_model_json(data: SpeechData):
         if size in data.whisper_transcripts:
             return data.whisper_transcripts[size].get("json")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Positioned wdiff parsing for targeted diff resolution
+# ---------------------------------------------------------------------------
+
+def _parse_wdiff_diffs(text_a: str, text_b: str, config: SpeechConfig) -> list[dict]:
+    """Run wdiff on two texts and return positioned diffs.
+
+    Each diff has:
+        type: "substitution" | "insertion" | "deletion"
+        a_text: original words from text_a (empty for insertion)
+        b_text: original words from text_b (empty for deletion)
+        a_pos: word index in text_a where diff starts
+        b_pos: word index in text_b where diff starts
+        a_len: number of words in text_a span
+        b_len: number of words in text_b span
+
+    Normalization is used for alignment only — the returned a_text/b_text
+    are from the original (unnormalized) texts so replacements preserve
+    the original casing and punctuation.
+    """
+    import os
+    import subprocess
+
+    norm_a = _normalize_for_comparison(text_a)
+    norm_b = _normalize_for_comparison(text_b)
+    a_words_orig = text_a.split()
+    b_words_orig = text_b.split()
+
+    a_path = _write_temp_text(norm_a)
+    b_path = _write_temp_text(norm_b)
+    try:
+        result = subprocess.run(
+            ["wdiff", a_path, b_path],
+            capture_output=True, text=True,
+        )
+        tokens = _parse_wdiff_tokens(result.stdout)
+    finally:
+        os.unlink(a_path)
+        os.unlink(b_path)
+
+    # Walk tokens, tracking positions in both original texts
+    diffs = []
+    a_pos = 0
+    b_pos = 0
+
+    i = 0
+    while i < len(tokens):
+        tok_type, tok_text = tokens[i]
+        n = len(tok_text.split())
+
+        if tok_type == "common":
+            a_pos += n
+            b_pos += n
+            i += 1
+
+        elif tok_type == "deleted" and i + 1 < len(tokens) and tokens[i + 1][0] == "inserted":
+            # Adjacent deleted + inserted = substitution
+            ins_text = tokens[i + 1][1]
+            ins_n = len(ins_text.split())
+            diffs.append({
+                "type": "substitution",
+                "a_text": " ".join(a_words_orig[a_pos:a_pos + n]),
+                "b_text": " ".join(b_words_orig[b_pos:b_pos + ins_n]),
+                "a_pos": a_pos,
+                "b_pos": b_pos,
+                "a_len": n,
+                "b_len": ins_n,
+            })
+            a_pos += n
+            b_pos += ins_n
+            i += 2
+
+        elif tok_type == "deleted":
+            # In A only (deletion from B's perspective)
+            diffs.append({
+                "type": "deletion",
+                "a_text": " ".join(a_words_orig[a_pos:a_pos + n]),
+                "b_text": "",
+                "a_pos": a_pos,
+                "b_pos": b_pos,
+                "a_len": n,
+                "b_len": 0,
+            })
+            a_pos += n
+            i += 1
+
+        elif tok_type == "inserted":
+            # In B only (insertion from A's perspective)
+            diffs.append({
+                "type": "insertion",
+                "a_text": "",
+                "b_text": " ".join(b_words_orig[b_pos:b_pos + n]),
+                "a_pos": a_pos,
+                "b_pos": b_pos,
+                "a_len": 0,
+                "b_len": n,
+            })
+            b_pos += n
+            i += 1
+
+    return diffs
+
+
+def _filter_trivial_diffs(diffs: list[dict]) -> list[dict]:
+    """Remove diffs where both sides are only common/stop words."""
+    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at',
+                    'to', 'for', 'of', 'is', 'it', 'i', 'we', 'he', 'she',
+                    'they', 'you', 'my', 'your', 'his', 'her', 'its', 'our',
+                    'their', 'this', 'that', 'was', 'were', 'be', 'been',
+                    'has', 'have', 'had', 'do', 'does', 'did', 'will',
+                    'would', 'could', 'should', 'may', 'might', 'not', 'no',
+                    'so', 'if', 'then', 'than', 'just', 'also', 'very'}
+    filtered = []
+    for d in diffs:
+        a_words = set(d["a_text"].lower().split()) if d["a_text"] else set()
+        b_words = set(d["b_text"].lower().split()) if d["b_text"] else set()
+        # Keep if either side has a non-trivial word
+        if not (a_words <= common_words and b_words <= common_words):
+            filtered.append(d)
+    return filtered
+
+
+def _cluster_diffs(diffs: list[dict], base_word_count: int,
+                   context_words: int = 30,
+                   max_cluster_diffs: int = 50) -> list[list[dict]]:
+    """Group nearby diffs into clusters for batched LLM resolution.
+
+    Diffs within context_words of each other are grouped together.
+    Each cluster is capped at max_cluster_diffs diffs.
+    """
+    if not diffs:
+        return []
+
+    # Sort by position in base text (text_a)
+    sorted_diffs = sorted(diffs, key=lambda d: d["a_pos"])
+
+    clusters = []
+    current = [sorted_diffs[0]]
+
+    for d in sorted_diffs[1:]:
+        prev = current[-1]
+        prev_end = prev["a_pos"] + prev["a_len"]
+        gap = d["a_pos"] - prev_end
+
+        if gap <= context_words and len(current) < max_cluster_diffs:
+            current.append(d)
+        else:
+            clusters.append(current)
+            current = [d]
+
+    if current:
+        clusters.append(current)
+
+    return clusters
+
+
+def _clean_resolution(text: str) -> str:
+    """Clean LLM format leakage from a resolution choice.
+
+    Strips patterns like 'Model A: "text"', 'Decision: text', surrounding quotes.
+    """
+    # Strip pipe + second model alternative first (e.g., '| Model B: "xyz"')
+    text = re.sub(r'\s*\|\s*(?:Model\s+[AB])\s*:.*$', '', text, flags=re.IGNORECASE)
+    # Strip "Model A:" / "Model B:" prefix (case-insensitive)
+    text = re.sub(r'^(?:Model\s+[AB])\s*:\s*', '', text, flags=re.IGNORECASE)
+    # Strip "Current:" / "Alternative:" / "Decision:" / "Choice:" / "Reading:" prefix
+    text = re.sub(r'^(?:Current|Alternative|Alternative adds|Decision|Choice|Reading)\s*:\s*', '', text, flags=re.IGNORECASE)
+    # Strip surrounding quotes
+    text = text.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    return text.strip()
+
+
+def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
+                          other_words: list[str], context_words: int = 30) -> str:
+    """Build an LLM prompt for resolving a cluster of diffs.
+
+    Shows context around the diffs with numbered disagreement markers.
+    Uses anonymous Model A / Model B labels.
+    """
+    # Find the span this cluster covers in the base text
+    first_pos = cluster[0]["a_pos"]
+    last = cluster[-1]
+    last_end = last["a_pos"] + last["a_len"]
+
+    ctx_start = max(0, first_pos - context_words)
+    ctx_end = min(len(base_words), last_end + context_words)
+
+    # Build context with inline markers
+    context_parts = []
+    pos = ctx_start
+    disagreements = []
+
+    for i, d in enumerate(cluster, 1):
+        # Add text before this diff
+        if pos < d["a_pos"]:
+            context_parts.append(" ".join(base_words[pos:d["a_pos"]]))
+
+        # Add diff marker
+        context_parts.append(f"[{i}]")
+        disagreements.append(d)
+
+        # Advance past the diff in text_a
+        pos = d["a_pos"] + d["a_len"]
+
+    # Add trailing context
+    if pos < ctx_end:
+        context_parts.append(" ".join(base_words[pos:ctx_end]))
+
+    context_line = " ".join(context_parts)
+    if ctx_start > 0:
+        context_line = "..." + context_line
+    if ctx_end < len(base_words):
+        context_line = context_line + "..."
+
+    # Build disagreement list
+    diff_lines = []
+    for i, d in enumerate(disagreements, 1):
+        if d["type"] == "substitution":
+            diff_lines.append(f'{i}. Model A: "{d["a_text"]}" | Model B: "{d["b_text"]}"')
+        elif d["type"] == "deletion":
+            diff_lines.append(f'{i}. Model A: "{d["a_text"]}" | Model B: (omitted)')
+        elif d["type"] == "insertion":
+            diff_lines.append(f'{i}. Model A: (omitted) | Model B: "{d["b_text"]}"')
+
+    return f"""CONTEXT:
+{context_line}
+
+DISAGREEMENTS:
+{chr(10).join(diff_lines)}"""
+
+
+def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
+                           config: SpeechConfig) -> str:
+    """Resolve Whisper model disagreements via targeted diff resolution.
+
+    Instead of rewriting entire text chunks, this:
+    1. Finds positioned diffs between transcripts
+    2. Groups nearby diffs into clusters
+    3. Asks the LLM to resolve each cluster's disagreements
+    4. Applies targeted replacements to the base text
+    """
+    # Collapse hallucination loops before processing
+    all_loops = {}
+    base_text, base_loops = collapse_repetition_loops(base_text)
+    if base_loops:
+        all_loops["base"] = base_loops
+    all_transcripts = dict(all_transcripts)
+    for model in list(all_transcripts.keys()):
+        collapsed, loops = collapse_repetition_loops(all_transcripts[model])
+        if loops:
+            all_loops[model] = loops
+        all_transcripts[model] = collapsed
+
+    if all_loops:
+        total = sum(len(v) for v in all_loops.values())
+        print(f"  Collapsed {total} Whisper hallucination loop(s)")
+
+    # Step 1: Find positioned diffs between base and each other model
+    base_words = base_text.split()
+    base_model = None
+    for size in MODEL_SIZES:
+        if size in all_transcripts:
+            base_model = size
+            break
+    if not base_model:
+        base_model = list(all_transcripts.keys())[0]
+
+    other_models = [m for m in all_transcripts if m != base_model]
+
+    # For now, handle the 2-model case: one set of diffs
+    # (For 3+ models, we'd need to merge diff sets — future work)
+    all_diffs = []
+    for other_model in other_models:
+        diffs = _parse_wdiff_diffs(
+            all_transcripts[other_model],  # text_a = other
+            all_transcripts[base_model],   # text_b = base
+            config,
+        )
+        # Filter trivial diffs
+        diffs = _filter_trivial_diffs(diffs)
+        print(f"  Found {len(diffs)} meaningful differences ({other_model} vs {base_model})")
+        all_diffs.extend(diffs)
+
+    if not all_diffs:
+        print("  No meaningful differences to resolve")
+        return base_text
+
+    # Step 2: Cluster diffs
+    clusters = _cluster_diffs(
+        all_diffs, len(base_words),
+        context_words=config.merge_diff_context_words,
+        max_cluster_diffs=config.merge_max_diffs_per_call,
+    )
+    total_diffs = sum(len(c) for c in clusters)
+    print(f"  Grouped {total_diffs} diffs into {len(clusters)} cluster(s)")
+
+    # Step 3: Resolve each cluster via LLM
+    client = create_llm_client(config)
+
+    # Build hallucination warning for prompt
+    hallucination_warning = ""
+    if all_loops:
+        hallucination_warning = "\nWARNING: Some models had hallucination loops (repeated phrases). "
+        hallucination_warning += "These have been collapsed. Do NOT choose repetitive readings.\n"
+
+    # Collect all resolutions: list of (diff, chosen_text) pairs
+    resolutions = {}  # diff index in all_diffs → chosen text
+
+    for cluster_idx, cluster in enumerate(clusters):
+        print(f"  Resolving cluster {cluster_idx + 1}/{len(clusters)} ({len(cluster)} diffs)...")
+
+        # Build prompt for this cluster
+        # Note: diffs have a_text = other model, b_text = base model
+        # For anonymous presentation, randomly assign A/B labels
+        cluster_prompt = _build_cluster_prompt(
+            cluster, base_words,
+            all_transcripts[other_models[0]].split() if other_models else [],
+            context_words=config.merge_diff_context_words,
+        )
+
+        prompt = f"""You are resolving disagreements between two Whisper transcriptions of the same speech.
+No model is more reliable than the other — judge each difference on its merits.
+{hallucination_warning}
+{cluster_prompt}
+
+For each numbered disagreement, output ONLY your chosen reading on a separate line.
+If a model omitted words, output "(omit)" to leave them out, or the words to include them.
+Format: one line per decision, starting with the number.
+
+Output your decisions:"""
+
+        message = llm_call_with_retry(
+            client, config,
+            model=config.claude_model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response = _clean_llm_output(message.content[0].text)
+
+        # Parse response: "1. chosen text" or "1: chosen text"
+        for line in response.splitlines():
+            line = line.strip()
+            m = re.match(r'^(\d+)[.):]\s*(.*)', line)
+            if m:
+                num = int(m.group(1))
+                chosen = m.group(2).strip()
+                # Strip LLM format leakage: "Model A: ...", quotes, "Decision: ..."
+                chosen = _clean_resolution(chosen)
+                if 1 <= num <= len(cluster):
+                    diff = cluster[num - 1]
+                    diff_key = id(diff)
+                    resolutions[diff_key] = chosen
+
+    # Step 4: Apply resolutions to base text
+    resolved_text = _apply_resolutions(base_words, all_diffs, resolutions)
+
+    resolved_words = len(resolved_text.split())
+    applied = sum(1 for d in all_diffs if id(d) in resolutions)
+    print(f"  Applied {applied}/{total_diffs} resolutions ({resolved_words} words)")
+
+    return resolved_text
+
+
+def _apply_resolutions(base_words: list[str], diffs: list[dict],
+                       resolutions: dict) -> str:
+    """Apply LLM resolutions to the base text.
+
+    Walks the base text word by word. At each diff position (in text_b,
+    since text_b is the base), substitutes the LLM's chosen text.
+    Unresolved diffs keep the base text.
+    """
+    # Sort diffs by b_pos (position in base text)
+    sorted_diffs = sorted(diffs, key=lambda d: d["b_pos"])
+
+    result = []
+    pos = 0
+
+    for d in sorted_diffs:
+        diff_key = id(d)
+        b_start = d["b_pos"]
+        b_len = d["b_len"]
+
+        # Add base text before this diff
+        if pos < b_start:
+            result.extend(base_words[pos:b_start])
+
+        if diff_key in resolutions:
+            chosen = resolutions[diff_key]
+            # Handle "(omit)" response — skip the words
+            if chosen.lower().strip("()") == "omit":
+                pass  # Don't add anything
+            else:
+                result.extend(chosen.split())
+        else:
+            # No resolution — keep base text
+            if b_len > 0:
+                result.extend(base_words[b_start:b_start + b_len])
+
+        pos = b_start + b_len
+
+    # Add remaining base text
+    if pos < len(base_words):
+        result.extend(base_words[pos:])
+
+    return " ".join(result)
 
 
 def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
@@ -68,8 +482,8 @@ def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
 def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps: dict) -> None:
     """Run a single Whisper model and save output."""
     # Create model-specific output names
-    txt_path = config.output_dir / f"{model}.txt"
-    json_path = config.output_dir / f"{model}.json"
+    txt_path = config.output_dir / f"whisper_{model}.txt"
+    json_path = config.output_dir / f"whisper_{model}.json"
 
     # Check if up to date (output newer than audio input)
     if _should_skip(config, txt_path, f"transcribe with Whisper {model}", data.audio_path):
@@ -131,6 +545,18 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
                 "language": result.get("language", "en")
             })
 
+    # Collapse Whisper hallucination loops in the text output
+    if txt_path.exists():
+        text = txt_path.read_text()
+        collapsed, loops = collapse_repetition_loops(text)
+        if loops:
+            txt_path.write_text(collapsed)
+            total_removed = sum(
+                len(l["phrase"].split()) * (l["count"] - 2) for l in loops
+            )
+            print(f"  Collapsed {len(loops)} hallucination loop(s) "
+                  f"({total_removed} words removed)")
+
     data.whisper_transcripts[model] = {
         "txt": txt_path if txt_path.exists() else None,
         "json": json_path if json_path.exists() else None
@@ -139,19 +565,19 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
 
 
 def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> None:
-    """Ensemble multiple Whisper transcripts using wdiff."""
-    # Check for existing ensembled file
+    """Adjudicate multiple Whisper transcripts using wdiff."""
+    # Check for existing whisper_merged file
     if data.audio_path:
-        ensembled_path = config.output_dir / "ensembled.txt"
+        merged_path = config.output_dir / WHISPER_MERGED_TXT
         # Inputs are the individual whisper transcripts
         whisper_inputs = [paths["txt"] for paths in data.whisper_transcripts.values()
                          if paths.get("txt")]
-        if _should_skip(config, ensembled_path, "ensemble Whisper transcripts", *whisper_inputs):
-            if ensembled_path.exists():
-                data.transcript_path = ensembled_path
+        if _should_skip(config, merged_path, "adjudicate Whisper transcripts", *whisper_inputs):
+            if merged_path.exists():
+                data.transcript_path = merged_path
                 data.transcript_json_path = _select_largest_model_json(data)
             return
-    print(f"  Ensembling {len(data.whisper_transcripts)} Whisper transcripts...")
+    print(f"  Adjudicating {len(data.whisper_transcripts)} Whisper transcripts...")
 
     models = list(data.whisper_transcripts.keys())
     if len(models) < 2:
@@ -181,138 +607,138 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
     base_text = transcripts[base_model]
     print(f"  Using {base_model} as base transcript")
 
-    # Compare with other models using wdiff
-    other_models = [m for m in transcripts.keys() if m != base_model]
-
-    # Analyze differences between models
-    all_differences = []
-    for other_model in other_models:
-        other_text = transcripts[other_model]
-        diffs = _analyze_differences_wdiff(other_text, base_text, config,
-                                            label_a=other_model, label_b=base_model)
-        if diffs:
-            print(f"  Found {len(diffs)} differences between {other_model} and {base_model}")
-            all_differences.extend(diffs)
-
-    # If we have differences and API key, use Claude to resolve
-    if all_differences:
-        if config.no_llm:
-            print("  --no-llm flag set - using base model without resolving differences")
-            ensembled_text = base_text
-        else:
-            ensembled_text = _resolve_whisper_differences(
-                base_text, transcripts, all_differences, config
-            )
+    if config.no_llm:
+        print("  --no-llm flag set - using base model without resolving differences")
+        merged_text = base_text
     else:
-        print("  No significant differences found between models")
-        ensembled_text = base_text
+        merged_text = _resolve_whisper_diffs(base_text, transcripts, config)
 
-    # Save ensembled transcript
-    ensembled_path = config.output_dir / "ensembled.txt"
-    with open(ensembled_path, 'w') as f:
-        f.write(ensembled_text)
+    # Save whisper-merged transcript
+    merged_path = config.output_dir / WHISPER_MERGED_TXT
+    with open(merged_path, 'w') as f:
+        f.write(merged_text)
 
-    data.transcript_path = ensembled_path
-    print(f"  Ensembled transcript saved: {ensembled_path.name}")
+    data.transcript_path = merged_path
+    print(f"  Whisper-merged transcript saved: {merged_path.name}")
 
     data.transcript_json_path = _select_largest_model_json(data)
 
 
-def _resolve_whisper_differences(base_text: str, all_transcripts: dict,
-                                  differences: list, config: SpeechConfig) -> str:
-    """Use LLM to resolve differences between Whisper model outputs."""
-
-    # Format differences for Claude
-    meaningful_diffs = _filter_meaningful_diffs(differences)
-    diff_summary = ""
-    if meaningful_diffs:
-        diff_summary = "\nDIFFERENCES BETWEEN WHISPER MODELS:\n"
-        for i, d in enumerate(meaningful_diffs[:50], 1):
-            if d["type"] == "changed":
-                diff_summary += f"{i}. {d['a_source']} has \"{d['a_text']}\" vs {d['b_source']} has \"{d['b_text']}\"\n"
-            elif d["type"] == "a_only":
-                diff_summary += f"{i}. {d['source']} has: \"{d['text']}\" (missing in other)\n"
-            elif d["type"] == "b_only":
-                diff_summary += f"{i}. {d['source']} has: \"{d['text']}\" (missing in other)\n"
-
-    # Split into chunks if transcript is long
-    base_words = base_text.split()
-
-    if len(base_words) <= config.merge_chunk_words:
-        return _resolve_whisper_chunk(base_text, all_transcripts,
-                                      diff_summary, config)
-
-    # Process in chunks
-    num_chunks = (len(base_words) // config.merge_chunk_words) + 1
-    print(f"  Splitting ensembling into {num_chunks} chunks...")
-    merged_chunks = []
-
-    for i in range(num_chunks):
-        start_idx = i * config.merge_chunk_words
-        end_idx = min((i + 1) * config.merge_chunk_words, len(base_words))
-        base_chunk = " ".join(base_words[start_idx:end_idx])
-
-        # Proportionally slice other transcripts
-        other_chunks = {}
-        for model, text in all_transcripts.items():
-            if model != "ensembled":
-                words = text.split()
-                ot_start = int(start_idx * len(words) / len(base_words))
-                ot_end = int(end_idx * len(words) / len(base_words))
-                other_chunks[model] = " ".join(words[ot_start:ot_end])
-
-        print(f"  Ensembling chunk {i+1}/{num_chunks}...")
-        chunk_result = _resolve_whisper_chunk(base_chunk, other_chunks,
-                                              diff_summary, config)
-        merged_chunks.append(chunk_result)
-
-    return "\n\n".join(merged_chunks)
+def _clean_llm_output(text: str) -> str:
+    """Remove common LLM formatting artifacts from merge output."""
+    lines = text.strip().splitlines()
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip separator lines (---, ***, ===, etc.)
+        if re.match(r'^[-*=]{3,}$', stripped):
+            continue
+        # Skip markdown headers that the LLM may prepend
+        if re.match(r'^#{1,3}\s', stripped):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
-def _resolve_whisper_chunk(base_text: str, all_transcripts: dict,
-                            diff_summary: str, config: SpeechConfig) -> str:
-    """Use LLM to resolve differences in a chunk of Whisper model outputs."""
-    # Format other transcripts for reference
-    other_transcripts_text = ""
-    for model, text in all_transcripts.items():
-        if model != "ensembled":
-            other_transcripts_text += f"\n--- {model.upper()} MODEL ---\n{text}\n"
+def detect_repetition_loops(text: str, min_repeats: int = 4,
+                             max_phrase_words: int = 10) -> list[dict]:
+    """Detect consecutive repetition loops in text.
 
-    client = create_llm_client(config)
+    Returns a list of dicts with keys: phrase, count, start_pos, end_pos.
+    """
+    loops = []
+    words = text.split()
+    n = len(words)
+    i = 0
 
-    prompt = f"""You are ensembling multiple Whisper transcripts of the same speech to create the most accurate version.
+    while i < n:
+        best_phrase_len = 0
+        best_count = 0
 
-BASE TRANSCRIPT (largest model, use as primary source):
----
-{base_text}
----
+        # Try phrase lengths from shortest to longest — prefer the shortest
+        # phrase with the most repeats (hallucinations repeat short phrases)
+        for phrase_len in range(1, min(max_phrase_words, (n - i) // min_repeats) + 1):
+            phrase = words[i:i + phrase_len]
+            count = 1
+            j = i + phrase_len
+            while j + phrase_len <= n and words[j:j + phrase_len] == phrase:
+                count += 1
+                j += phrase_len
 
-OTHER MODEL OUTPUTS (for reference):
-{other_transcripts_text}
-{diff_summary}
-INSTRUCTIONS:
-1. Start with the base transcript
-2. Review each difference - if a smaller model captured something the larger model missed
-   (especially proper nouns, technical terms, or additional content), incorporate it
-3. When models disagree on a word, prefer the version that:
-   - Makes more grammatical sense
-   - Is a real word/name (not a transcription error like "progerium" vs "progeria")
-   - Fits the context better
-4. Output the COMPLETE ensembled transcript
-5. Do NOT add commentary - output ONLY the transcript text
+            if count >= min_repeats:
+                best_phrase_len = phrase_len
+                best_count = count
+                break  # Shortest repeating phrase found
 
-Output the ensembled transcript:"""
+        if best_count >= min_repeats:
+            phrase_text = " ".join(words[i:i + best_phrase_len])
+            # Calculate character positions
+            prefix = " ".join(words[:i])
+            start_pos = len(prefix) + (1 if prefix else 0)
+            repeated_text = (" ".join([phrase_text] * best_count))
+            end_pos = start_pos + len(repeated_text)
 
-    message = llm_call_with_retry(
-        client, config,
-        model=config.claude_model,
-        max_tokens=16384,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
+            loops.append({
+                "phrase": phrase_text,
+                "count": best_count,
+                "start_pos": start_pos,
+                "end_pos": end_pos,
+            })
+            i += best_phrase_len * best_count
+        else:
+            i += 1
 
-    return message.content[0].text.strip()
+    return loops
+
+
+def collapse_repetition_loops(text: str, min_repeats: int = 4,
+                               max_phrase_words: int = 10) -> tuple[str, list[dict]]:
+    """Collapse consecutive repetition loops, keeping only 2 occurrences.
+
+    Returns (collapsed_text, loops_found).
+    """
+    loops = detect_repetition_loops(text, min_repeats, max_phrase_words)
+    if not loops:
+        return text, []
+
+    # Rebuild text with loops collapsed (work on word array)
+    words = text.split()
+    result_words = []
+    i = 0
+    n = len(words)
+
+    for loop in sorted(loops, key=lambda l: l["start_pos"]):
+        phrase_words = loop["phrase"].split()
+        phrase_len = len(phrase_words)
+        total_len = phrase_len * loop["count"]
+
+        # Find the word index where this loop starts
+        # Walk forward to find the matching position
+        while i < n:
+            # Check if current position is the start of this loop
+            if (i + total_len <= n and
+                    words[i:i + phrase_len] == phrase_words):
+                # Verify this is actually the full loop
+                is_loop = True
+                for k in range(loop["count"]):
+                    if words[i + k * phrase_len:i + (k + 1) * phrase_len] != phrase_words:
+                        is_loop = False
+                        break
+                if is_loop:
+                    # Keep only 2 occurrences
+                    result_words.extend(phrase_words)
+                    result_words.extend(phrase_words)
+                    i += total_len
+                    break
+            result_words.append(words[i])
+            i += 1
+
+    # Append remaining words
+    result_words.extend(words[i:])
+
+    return " ".join(result_words), loops
+
+
 
 
 def _load_transcript_segments(data: SpeechData) -> None:

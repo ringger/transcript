@@ -14,6 +14,7 @@ from pathlib import Path
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
+    SLIDE_TIMESTAMPS_JSON, SLIDES_TRANSCRIPT_JSON,
     create_llm_client, llm_call_with_retry,
     _save_json, _print_reusing, _dry_run_skip, _should_skip,
 )
@@ -32,7 +33,7 @@ def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
     slides_dir.mkdir(exist_ok=True)
     data.slides_dir = slides_dir
 
-    timestamps_file = config.output_dir / "slide_timestamps.json"
+    timestamps_file = config.output_dir / SLIDE_TIMESTAMPS_JSON
 
     existing_slides = list(slides_dir.glob("slide_*.png"))
     if existing_slides and _should_skip(config, timestamps_file, "extract slides from video", data.video_path):
@@ -118,7 +119,7 @@ def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
         print("  No slides to analyze")
         return
 
-    slides_json_path = config.output_dir / "slides_transcript.json"
+    slides_json_path = config.output_dir / SLIDES_TRANSCRIPT_JSON
     if _should_skip(config, slides_json_path, "analyze slides with vision LLM", *data.slide_images):
         if slides_json_path.exists():
             with open(slides_json_path, 'r') as f:
@@ -191,7 +192,7 @@ Return ONLY the JSON object, no other text."""
     data.slide_metadata = slides_metadata
 
     # Save slides JSON
-    slides_json_path = config.output_dir / "slides_transcript.json"
+    slides_json_path = config.output_dir / SLIDES_TRANSCRIPT_JSON
     _save_json(slides_json_path, {
         "title": data.title,
         "slide_count": len(slides_metadata),

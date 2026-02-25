@@ -11,7 +11,9 @@ from transcribe_critic.merge import _format_structured_segments
 from transcribe_critic.download import clean_vtt_captions
 from transcribe_critic.output import generate_markdown
 from transcribe_critic.transcriber import (
+    _hydrate_data,
     _load_external_transcript,
+    _should_run_step,
     _slugify_title,
     _strip_structured_headers,
     analyze_source_survival,
@@ -82,7 +84,7 @@ class TestStripStructuredHeaders:
 
 def _make_test_artefacts(tmp_path):
     """Create a minimal set of artefacts for testing stage skip/run logic."""
-    whisper = tmp_path / "ensembled.txt"
+    whisper = tmp_path / "whisper_merged.txt"
     whisper.write_text("whisper transcript words " * 200)
     captions_vtt = tmp_path / "captions.en.vtt"
     captions_vtt.write_text(
@@ -426,7 +428,7 @@ class TestDiarizedSkeletonRouting:
 
     def _make_diarized_artefacts(self, tmp_path, *, has_external=False, has_captions=False):
         """Create artefacts for diarized skeleton routing tests."""
-        whisper = tmp_path / "ensembled.txt"
+        whisper = tmp_path / "whisper_merged.txt"
         whisper.write_text("Hello world this is a test transcript " * 30)
 
         diarized = tmp_path / "diarized.txt"
@@ -512,3 +514,125 @@ class TestDiarizedSkeletonRouting:
         assert call_kwargs[1]["skeleton_source_name"] == "External Transcript"
         out = capsys.readouterr().out
         assert "external transcript provides structure" in out
+
+
+# ---------------------------------------------------------------------------
+# _should_run_step
+# ---------------------------------------------------------------------------
+
+class TestShouldRunStep:
+    def test_no_steps_filter_runs_all(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, steps=None)
+        assert _should_run_step("download", config) is True
+        assert _should_run_step("merge", config) is True
+        assert _should_run_step("transcribe", config) is True
+
+    def test_steps_filter_allows_listed(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, steps=["merge", "markdown"])
+        assert _should_run_step("merge", config) is True
+        assert _should_run_step("markdown", config) is True
+
+    def test_steps_filter_blocks_unlisted(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, steps=["merge"])
+        assert _should_run_step("download", config) is False
+        assert _should_run_step("transcribe", config) is False
+        assert _should_run_step("slides", config) is False
+
+    def test_single_step(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, steps=["transcribe"])
+        assert _should_run_step("transcribe", config) is True
+        assert _should_run_step("merge", config) is False
+
+
+# ---------------------------------------------------------------------------
+# _hydrate_data
+# ---------------------------------------------------------------------------
+
+class TestHydrateData:
+    def test_finds_audio_mp3(self, tmp_path):
+        (tmp_path / "audio.mp3").write_bytes(b"fake")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.audio_path == tmp_path / "audio.mp3"
+
+    def test_finds_audio_wav(self, tmp_path):
+        (tmp_path / "audio.wav").write_bytes(b"fake")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.audio_path == tmp_path / "audio.wav"
+
+    def test_prefers_mp3_over_wav(self, tmp_path):
+        (tmp_path / "audio.mp3").write_bytes(b"fake")
+        (tmp_path / "audio.wav").write_bytes(b"fake")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.audio_path == tmp_path / "audio.mp3"
+
+    def test_finds_whisper_transcripts(self, tmp_path):
+        (tmp_path / "whisper_small.txt").write_text("small text")
+        (tmp_path / "whisper_small.json").write_text("{}")
+        (tmp_path / "whisper_medium.txt").write_text("medium text")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert "small" in data.whisper_transcripts
+        assert "medium" in data.whisper_transcripts
+        assert data.whisper_transcripts["small"]["txt"] == tmp_path / "whisper_small.txt"
+        assert data.whisper_transcripts["small"]["json"] == tmp_path / "whisper_small.json"
+        assert data.whisper_transcripts["medium"]["json"] is None
+
+    def test_ignores_whisper_merged(self, tmp_path):
+        (tmp_path / "whisper_merged.txt").write_text("merged text")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert "merged" not in data.whisper_transcripts
+
+    def test_finds_whisper_merged_as_transcript(self, tmp_path):
+        (tmp_path / "whisper_merged.txt").write_text("merged text")
+        (tmp_path / "whisper_small.txt").write_text("small text")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.transcript_path == tmp_path / "whisper_merged.txt"
+
+    def test_falls_back_to_largest_model(self, tmp_path):
+        (tmp_path / "whisper_small.txt").write_text("small text")
+        (tmp_path / "whisper_medium.txt").write_text("medium text")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        # medium is larger than small, so it becomes transcript_path
+        assert data.transcript_path == tmp_path / "whisper_medium.txt"
+
+    def test_finds_captions(self, tmp_path):
+        (tmp_path / "captions.en.vtt").write_text("WEBVTT\n")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.captions_path == tmp_path / "captions.en.vtt"
+
+    def test_finds_diarization(self, tmp_path):
+        (tmp_path / "diarized.txt").write_text("[0:00:00] Speaker: Hello")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.diarization_path == tmp_path / "diarized.txt"
+
+    def test_finds_merged_transcript(self, tmp_path):
+        (tmp_path / "transcript_merged.txt").write_text("merged")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.merged_transcript_path == tmp_path / "transcript_merged.txt"
+
+    def test_empty_dir(self, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert data.audio_path is None
+        assert data.transcript_path is None
+        assert data.whisper_transcripts == {}

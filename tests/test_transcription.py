@@ -9,12 +9,19 @@ import pytest
 from transcribe_critic.shared import SpeechConfig, SpeechData
 
 from transcribe_critic.transcription import (
+    _apply_resolutions,
+    _build_cluster_prompt,
+    _clean_llm_output,
+    _clean_resolution,
+    _cluster_diffs,
     _ensemble_whisper_transcripts,
+    _filter_trivial_diffs,
     _load_transcript_segments,
-    _resolve_whisper_chunk,
-    _resolve_whisper_differences,
+    _parse_wdiff_diffs,
     _run_whisper_model,
     _select_largest_model_json,
+    collapse_repetition_loops,
+    detect_repetition_loops,
     transcribe_audio,
 )
 
@@ -91,115 +98,226 @@ class TestLoadTranscriptSegments:
 
 
 # ---------------------------------------------------------------------------
-# Whisper ensembling: _resolve_whisper_chunk
+# Whisper ensembling: targeted diff resolution
 # ---------------------------------------------------------------------------
 
-class TestResolveWhisperChunk:
-    """Test _resolve_whisper_chunk with mocked LLM."""
+class TestParseWdiffDiffs:
+    """Test _parse_wdiff_diffs position tracking and diff types."""
 
-    @patch("transcribe_critic.transcription.create_llm_client")
-    @patch("transcribe_critic.transcription.llm_call_with_retry")
-    def test_basic_resolution(self, mock_llm, mock_client, tmp_path):
+    def test_substitution(self, tmp_path):
+        text_a = "The quick brown fox jumps"
+        text_b = "The quick red fox jumps"
         config = SpeechConfig(url="x", output_dir=tmp_path)
-        base_text = "Hello world"
-        all_transcripts = {"medium": "Hello world", "small": "Hello worlds"}
-        diff_summary = "1. small has 'worlds' vs medium has 'world'"
+        diffs = _parse_wdiff_diffs(text_a, text_b, config)
+        subs = [d for d in diffs if d["type"] == "substitution"]
+        assert len(subs) == 1
+        assert subs[0]["a_text"] == "brown"
+        assert subs[0]["b_text"] == "red"
+        assert subs[0]["a_pos"] == 2
+        assert subs[0]["b_pos"] == 2
 
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock()]
-        mock_resp.content[0].text = "Hello world"
-        mock_llm.return_value = mock_resp
-
-        result = _resolve_whisper_chunk(base_text, all_transcripts, diff_summary, config)
-        assert result == "Hello world"
-        mock_llm.assert_called_once()
-
-    @patch("transcribe_critic.transcription.create_llm_client")
-    @patch("transcribe_critic.transcription.llm_call_with_retry")
-    def test_prompt_contains_base_and_diffs(self, mock_llm, mock_client, tmp_path):
+    def test_deletion(self, tmp_path):
+        text_a = "The very quick fox"
+        text_b = "The quick fox"
         config = SpeechConfig(url="x", output_dir=tmp_path)
-        base_text = "The quick brown fox"
-        all_transcripts = {"medium": base_text, "small": "A quick brown fox"}
-        diff_summary = "1. small: 'A' vs medium: 'The'"
+        diffs = _parse_wdiff_diffs(text_a, text_b, config)
+        dels = [d for d in diffs if d["type"] == "deletion"]
+        assert len(dels) == 1
+        assert dels[0]["a_text"] == "very"
+        assert dels[0]["b_text"] == ""
+        assert dels[0]["a_len"] == 1
+        assert dels[0]["b_len"] == 0
 
-        captured_kwargs = {}
-        def capture_call(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            msg = MagicMock()
-            msg.content = [MagicMock()]
-            msg.content[0].text = "The quick brown fox"
-            return msg
-        mock_llm.side_effect = capture_call
-
-        _resolve_whisper_chunk(base_text, all_transcripts, diff_summary, config)
-        prompt = captured_kwargs["messages"][0]["content"]
-        assert "The quick brown fox" in prompt
-        assert "SMALL MODEL" in prompt
-        assert diff_summary in prompt
-
-    @patch("transcribe_critic.transcription.create_llm_client")
-    @patch("transcribe_critic.transcription.llm_call_with_retry")
-    def test_strips_whitespace(self, mock_llm, mock_client, tmp_path):
+    def test_insertion(self, tmp_path):
+        text_a = "The quick fox"
+        text_b = "The quick brown fox"
         config = SpeechConfig(url="x", output_dir=tmp_path)
-        mock_resp = MagicMock()
-        mock_resp.content = [MagicMock()]
-        mock_resp.content[0].text = "  result with spaces  \n"
-        mock_llm.return_value = mock_resp
+        diffs = _parse_wdiff_diffs(text_a, text_b, config)
+        ins = [d for d in diffs if d["type"] == "insertion"]
+        assert len(ins) == 1
+        assert ins[0]["a_text"] == ""
+        assert ins[0]["b_text"] == "brown"
 
-        result = _resolve_whisper_chunk("base", {"m": "base"}, "", config)
-        assert result == "result with spaces"
+    def test_identical_texts_no_diffs(self, tmp_path):
+        text = "Hello world this is a test"
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        diffs = _parse_wdiff_diffs(text, text, config)
+        assert diffs == []
+
+    def test_multiple_diffs_positions(self, tmp_path):
+        text_a = "The cat sat on the mat and quietly left"
+        text_b = "The dog sat on the rug and loudly left"
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        diffs = _parse_wdiff_diffs(text_a, text_b, config)
+        # cat→dog, mat→rug, quietly→loudly (mat/rug separated by "and")
+        assert len(diffs) >= 3
 
 
-# ---------------------------------------------------------------------------
-# Whisper ensembling: _resolve_whisper_differences
-# ---------------------------------------------------------------------------
+class TestFilterTrivialDiffs:
+    def test_keeps_proper_nouns(self):
+        diffs = [{"type": "substitution", "a_text": "Progerium", "b_text": "Progeria",
+                  "a_pos": 0, "b_pos": 0, "a_len": 1, "b_len": 1}]
+        assert len(_filter_trivial_diffs(diffs)) == 1
 
-class TestResolveWhisperDifferences:
-    """Test _resolve_whisper_differences chunking and diff formatting."""
+    def test_removes_stop_word_diffs(self):
+        diffs = [{"type": "substitution", "a_text": "the", "b_text": "a",
+                  "a_pos": 0, "b_pos": 0, "a_len": 1, "b_len": 1}]
+        assert len(_filter_trivial_diffs(diffs)) == 0
 
-    @patch("transcribe_critic.transcription._resolve_whisper_chunk")
-    def test_short_text_single_chunk(self, mock_chunk, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=500)
-        base_text = "short text here"
-        transcripts = {"medium": base_text, "small": "short texts here"}
-        diffs = [{"type": "changed", "a_text": "texts", "b_text": "text",
-                  "a_source": "small", "b_source": "medium"}]
-        mock_chunk.return_value = "short text here"
+    def test_keeps_mixed_diff(self):
+        diffs = [{"type": "substitution", "a_text": "the spectral", "b_text": "a special",
+                  "a_pos": 0, "b_pos": 0, "a_len": 2, "b_len": 2}]
+        # "spectral" and "special" are not stop words
+        assert len(_filter_trivial_diffs(diffs)) == 1
 
-        result = _resolve_whisper_differences(base_text, transcripts, diffs, config)
-        assert result == "short text here"
-        mock_chunk.assert_called_once()
 
-    @patch("transcribe_critic.transcription._resolve_whisper_chunk")
-    def test_long_text_multiple_chunks(self, mock_chunk, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=10)
-        base_text = "word " * 25  # 25 words, should split into 3 chunks
-        transcripts = {"medium": base_text, "small": base_text}
-        diffs = [{"type": "a_only", "text": "extra", "source": "small"}]
-        mock_chunk.return_value = "chunk result"
-
-        result = _resolve_whisper_differences(base_text, transcripts, diffs, config)
-        assert mock_chunk.call_count == 3
-        assert "chunk result" in result
-
-    @patch("transcribe_critic.transcription._resolve_whisper_chunk")
-    def test_diff_summary_formatting(self, mock_chunk, tmp_path):
-        config = SpeechConfig(url="x", output_dir=tmp_path, merge_chunk_words=500)
+class TestClusterDiffs:
+    def test_nearby_diffs_grouped(self):
         diffs = [
-            {"type": "changed", "a_text": "foo", "b_text": "bar",
-             "a_source": "small", "b_source": "medium"},
-            {"type": "a_only", "text": "extra", "source": "small"},
-            {"type": "b_only", "text": "bonus", "source": "medium"},
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
+            {"type": "substitution", "a_text": "mat", "b_text": "rug",
+             "a_pos": 10, "b_pos": 10, "a_len": 1, "b_len": 1},
         ]
-        mock_chunk.return_value = "result"
+        clusters = _cluster_diffs(diffs, base_word_count=100, context_words=10)
+        assert len(clusters) == 1  # close enough to be in one cluster
 
-        _resolve_whisper_differences("text", {"m": "text"}, diffs, config)
-        call_args = mock_chunk.call_args
-        diff_summary = call_args[0][2]  # Third positional arg
-        assert 'small has "foo"' in diff_summary
-        assert 'medium has "bar"' in diff_summary
-        assert '"extra"' in diff_summary
-        assert '"bonus"' in diff_summary
+    def test_distant_diffs_separated(self):
+        diffs = [
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
+            {"type": "substitution", "a_text": "mat", "b_text": "rug",
+             "a_pos": 100, "b_pos": 100, "a_len": 1, "b_len": 1},
+        ]
+        clusters = _cluster_diffs(diffs, base_word_count=200, context_words=10)
+        assert len(clusters) == 2
+
+    def test_empty_diffs(self):
+        assert _cluster_diffs([], base_word_count=100) == []
+
+    def test_max_cluster_diffs(self):
+        diffs = [
+            {"type": "substitution", "a_text": f"w{i}", "b_text": f"x{i}",
+             "a_pos": i * 2, "b_pos": i * 2, "a_len": 1, "b_len": 1}
+            for i in range(10)
+        ]
+        clusters = _cluster_diffs(diffs, base_word_count=100,
+                                  context_words=50, max_cluster_diffs=5)
+        assert all(len(c) <= 5 for c in clusters)
+
+
+# ---------------------------------------------------------------------------
+# _clean_resolution
+# ---------------------------------------------------------------------------
+
+class TestCleanResolution:
+    def test_strips_model_a_prefix(self):
+        assert _clean_resolution('Model A: "progeria"') == "progeria"
+
+    def test_strips_model_b_prefix(self):
+        assert _clean_resolution('Model B: "going to"') == "going to"
+
+    def test_strips_model_prefix_no_quotes(self):
+        assert _clean_resolution("Model A: can") == "can"
+
+    def test_strips_decision_prefix(self):
+        assert _clean_resolution("Decision: like,") == "like,"
+
+    def test_strips_surrounding_quotes(self):
+        assert _clean_resolution('"the spectral"') == "the spectral"
+
+    def test_strips_pipe_second_model(self):
+        assert _clean_resolution('Model A: "cat" | Model B: "dog"') == "cat"
+
+    def test_plain_text_unchanged(self):
+        assert _clean_resolution("progeria") == "progeria"
+
+    def test_omit_unchanged(self):
+        assert _clean_resolution("(omit)") == "(omit)"
+
+    def test_case_insensitive(self):
+        assert _clean_resolution('model a: "test"') == "test"
+
+    def test_strips_current_prefix(self):
+        assert _clean_resolution('Current: "going to"') == "going to"
+
+    def test_strips_alternative_prefix(self):
+        assert _clean_resolution('Alternative: "gonna"') == "gonna"
+
+    def test_strips_alternative_adds_prefix(self):
+        assert _clean_resolution('Alternative adds: "extra words"') == "extra words"
+
+
+class TestBuildClusterPrompt:
+    def test_contains_context_and_diffs(self):
+        cluster = [
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
+        ]
+        a_words = "The quick brown cat sat on the mat in the room".split()
+        b_words = "The quick brown dog sat on the mat in the room".split()
+        prompt = _build_cluster_prompt(cluster, a_words, b_words, context_words=3)
+        assert "[1]" in prompt
+        assert "cat" in prompt
+        assert "dog" in prompt
+        assert "Model A" in prompt
+        assert "Model B" in prompt
+
+    def test_insertion_shows_omitted(self):
+        cluster = [
+            {"type": "insertion", "a_text": "", "b_text": "extra",
+             "a_pos": 3, "b_pos": 3, "a_len": 0, "b_len": 1},
+        ]
+        a_words = "one two three four five".split()
+        b_words = "one two three extra four five".split()
+        prompt = _build_cluster_prompt(cluster, a_words, b_words)
+        assert "(omitted)" in prompt
+
+
+class TestApplyResolutions:
+    def test_substitution(self):
+        base_words = "The quick brown fox jumps".split()
+        diffs = [{"type": "substitution", "a_text": "red", "b_text": "brown",
+                  "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1}]
+        resolutions = {id(diffs[0]): "red"}
+        result = _apply_resolutions(base_words, diffs, resolutions)
+        assert result == "The quick red fox jumps"
+
+    def test_deletion_chosen(self):
+        base_words = "The very quick fox".split()
+        diffs = [{"type": "insertion", "a_text": "", "b_text": "very",
+                  "a_pos": 1, "b_pos": 1, "a_len": 0, "b_len": 1}]
+        resolutions = {id(diffs[0]): "(omit)"}
+        result = _apply_resolutions(base_words, diffs, resolutions)
+        assert result == "The quick fox"
+
+    def test_unresolved_keeps_base(self):
+        base_words = "The quick brown fox".split()
+        diffs = [{"type": "substitution", "a_text": "red", "b_text": "brown",
+                  "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1}]
+        resolutions = {}  # No resolution
+        result = _apply_resolutions(base_words, diffs, resolutions)
+        assert result == "The quick brown fox"
+
+    def test_multiple_resolutions(self):
+        base_words = "The cat sat on the mat".split()
+        diffs = [
+            {"type": "substitution", "a_text": "dog", "b_text": "cat",
+             "a_pos": 1, "b_pos": 1, "a_len": 1, "b_len": 1},
+            {"type": "substitution", "a_text": "rug", "b_text": "mat",
+             "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
+        ]
+        resolutions = {id(diffs[0]): "dog", id(diffs[1]): "rug"}
+        result = _apply_resolutions(base_words, diffs, resolutions)
+        assert result == "The dog sat on the rug"
+
+    def test_insertion_adds_words(self):
+        base_words = "The fox jumps".split()
+        diffs = [{"type": "deletion", "a_text": "brown", "b_text": "",
+                  "a_pos": 1, "b_pos": 1, "a_len": 1, "b_len": 0}]
+        resolutions = {id(diffs[0]): "brown"}
+        result = _apply_resolutions(base_words, diffs, resolutions)
+        assert result == "The brown fox jumps"
 
 
 # ---------------------------------------------------------------------------
@@ -228,18 +346,18 @@ class TestEnsembleWhisperTranscripts:
         data = self._make_whisper_data(tmp_path, models=("medium",))
         _ensemble_whisper_transcripts(config, data)
         # With only one model, should return without ensembling
-        assert not (tmp_path / "ensembled.txt").exists()
+        assert not (tmp_path / "whisper_merged.txt").exists()
 
-    def test_reuses_fresh_ensembled(self, tmp_path, capsys):
+    def test_reuses_fresh_whisper_merged(self, tmp_path, capsys):
         config = SpeechConfig(url="x", output_dir=tmp_path)
         data = self._make_whisper_data(tmp_path)
         # Create ensembled.txt newer than whisper files
         time.sleep(0.05)
-        ensembled = tmp_path / "ensembled.txt"
-        ensembled.write_text("cached ensembled text")
+        ensembled = tmp_path / "whisper_merged.txt"
+        ensembled.write_text("cached whisper_merged text")
         _ensemble_whisper_transcripts(config, data)
         out = capsys.readouterr().out
-        assert "Reusing: ensembled.txt" in out
+        assert "Reusing: whisper_merged.txt" in out
         assert data.transcript_path == ensembled
 
     def test_no_llm_uses_base(self, tmp_path, capsys):
@@ -247,44 +365,32 @@ class TestEnsembleWhisperTranscripts:
                               skip_existing=False)
         data = self._make_whisper_data(tmp_path)
         # Write distinct content to trigger differences
-        (tmp_path / "small.txt").write_text("hello world from small")
-        (tmp_path / "medium.txt").write_text("hello world from medium")
+        (tmp_path / "whisper_small.txt").write_text("hello world from small")
+        (tmp_path / "whisper_medium.txt").write_text("hello world from medium")
         _ensemble_whisper_transcripts(config, data)
         out = capsys.readouterr().out
         # Should use medium (larger) as base without LLM resolution
-        ensembled = (tmp_path / "ensembled.txt").read_text()
+        ensembled = (tmp_path / "whisper_merged.txt").read_text()
         assert "medium" in ensembled
         assert "--no-llm" in out
 
-    @patch("transcribe_critic.transcription._resolve_whisper_differences")
-    @patch("transcribe_critic.transcription._analyze_differences_wdiff")
-    def test_calls_resolve_when_diffs_found(self, mock_analyze, mock_resolve, tmp_path):
+    @patch("transcribe_critic.transcription._resolve_whisper_diffs")
+    def test_calls_resolve(self, mock_resolve, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
         data = self._make_whisper_data(tmp_path)
-        mock_analyze.return_value = [{"type": "changed", "a_text": "x", "b_text": "y"}]
         mock_resolve.return_value = "resolved text"
 
         _ensemble_whisper_transcripts(config, data)
         mock_resolve.assert_called_once()
-        assert (tmp_path / "ensembled.txt").read_text() == "resolved text"
-
-    @patch("transcribe_critic.transcription._analyze_differences_wdiff")
-    def test_no_diffs_uses_base(self, mock_analyze, tmp_path, capsys):
-        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
-        data = self._make_whisper_data(tmp_path)
-        mock_analyze.return_value = []
-
-        _ensemble_whisper_transcripts(config, data)
-        out = capsys.readouterr().out
-        assert "No significant differences" in out
+        assert (tmp_path / "whisper_merged.txt").read_text() == "resolved text"
 
     def test_selects_largest_model_as_base(self, tmp_path, capsys):
         config = SpeechConfig(url="x", output_dir=tmp_path, no_llm=True,
                               skip_existing=False)
         data = self._make_whisper_data(tmp_path, models=("tiny", "small", "large"))
-        (tmp_path / "tiny.txt").write_text("tiny text differs here")
-        (tmp_path / "small.txt").write_text("small text differs here")
-        (tmp_path / "large.txt").write_text("large text differs here")
+        (tmp_path / "whisper_tiny.txt").write_text("tiny text differs here")
+        (tmp_path / "whisper_small.txt").write_text("small text differs here")
+        (tmp_path / "whisper_large.txt").write_text("large text differs here")
         _ensemble_whisper_transcripts(config, data)
         out = capsys.readouterr().out
         assert "Using large as base" in out
@@ -296,7 +402,7 @@ class TestEnsembleWhisperTranscripts:
         _ensemble_whisper_transcripts(config, data)
         out = capsys.readouterr().out
         assert "[dry-run]" in out
-        assert not (tmp_path / "ensembled.txt").exists()
+        assert not (tmp_path / "whisper_merged.txt").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +418,7 @@ class TestRunWhisperModel:
         data.audio_path.write_text("fake")
         # Create existing output that is newer than audio
         time.sleep(0.05)
-        txt = tmp_path / "medium.txt"
+        txt = tmp_path / "whisper_medium.txt"
         txt.write_text("existing transcript")
         deps = {"mlx_whisper": True, "whisper": False}
         _run_whisper_model(config, data, "medium", deps)
@@ -346,9 +452,9 @@ class TestRunWhisperModel:
 
         _run_whisper_model(config, data, "small", deps)
         # Should have renamed to model-specific names
-        assert (tmp_path / "small.txt").exists()
-        assert (tmp_path / "small.json").exists()
-        assert data.whisper_transcripts["small"]["txt"] == tmp_path / "small.txt"
+        assert (tmp_path / "whisper_small.txt").exists()
+        assert (tmp_path / "whisper_small.json").exists()
+        assert data.whisper_transcripts["small"]["txt"] == tmp_path / "whisper_small.txt"
 
     @patch("transcribe_critic.transcription.run_command")
     def test_mlx_whisper_unlinks_existing_before_rename(self, mock_run, tmp_path):
@@ -357,8 +463,8 @@ class TestRunWhisperModel:
         data.audio_path.write_text("fake")
         deps = {"mlx_whisper": True, "whisper": False}
         # Pre-create target files (from a previous run)
-        (tmp_path / "small.txt").write_text("old")
-        (tmp_path / "small.json").write_text("old")
+        (tmp_path / "whisper_small.txt").write_text("old")
+        (tmp_path / "whisper_small.json").write_text("old")
 
         def create_default_files(cmd, desc, verbose=False):
             (tmp_path / "audio.txt").write_text("new text")
@@ -367,7 +473,7 @@ class TestRunWhisperModel:
         mock_run.side_effect = create_default_files
 
         _run_whisper_model(config, data, "small", deps)
-        assert (tmp_path / "small.txt").read_text() == "new text"
+        assert (tmp_path / "whisper_small.txt").read_text() == "new text"
 
     def test_openai_whisper_success(self, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
@@ -386,9 +492,9 @@ class TestRunWhisperModel:
         with patch.dict("sys.modules", {"whisper": mock_whisper}):
             _run_whisper_model(config, data, "medium", deps)
 
-        assert (tmp_path / "medium.txt").read_text() == "hello world"
-        assert (tmp_path / "medium.json").exists()
-        assert data.whisper_transcripts["medium"]["txt"] == tmp_path / "medium.txt"
+        assert (tmp_path / "whisper_medium.txt").read_text() == "hello world"
+        assert (tmp_path / "whisper_medium.json").exists()
+        assert data.whisper_transcripts["medium"]["txt"] == tmp_path / "whisper_medium.txt"
 
     @patch("transcribe_critic.transcription.run_command")
     def test_stores_none_when_files_missing(self, mock_run, tmp_path):
@@ -438,7 +544,7 @@ class TestTranscribeAudio:
         config = SpeechConfig(url="x", output_dir=tmp_path, whisper_models=["medium"])
         audio = tmp_path / "audio.mp3"
         audio.write_text("fake")
-        txt = tmp_path / "medium.txt"
+        txt = tmp_path / "whisper_medium.txt"
         txt.write_text("transcript")
         data = SpeechData(audio_path=audio)
 
@@ -469,10 +575,10 @@ class TestTranscribeAudio:
             d.whisper_transcripts[model] = {"txt": txt, "json": None}
         mock_run.side_effect = populate_transcripts
 
-        def set_ensembled(cfg, d):
-            d.transcript_path = tmp_path / "ensembled.txt"
-            d.transcript_path.write_text("ensembled")
-        mock_ensemble.side_effect = set_ensembled
+        def set_whisper_merged(cfg, d):
+            d.transcript_path = tmp_path / "whisper_merged.txt"
+            d.transcript_path.write_text("whisper_merged")
+        mock_ensemble.side_effect = set_whisper_merged
 
         transcribe_audio(config, data)
         assert mock_run.call_count == 2
@@ -500,12 +606,12 @@ class TestTranscribeAudio:
 
 class TestSelectLargestModelJson:
     def test_returns_largest_available(self, tmp_path):
-        json_medium = tmp_path / "medium.json"
-        json_small = tmp_path / "small.json"
+        json_medium = tmp_path / "whisper_medium.json"
+        json_small = tmp_path / "whisper_small.json"
         data = SpeechData()
         data.whisper_transcripts = {
-            "small": {"txt": tmp_path / "small.txt", "json": json_small},
-            "medium": {"txt": tmp_path / "medium.txt", "json": json_medium},
+            "small": {"txt": tmp_path / "whisper_small.txt", "json": json_small},
+            "medium": {"txt": tmp_path / "whisper_medium.txt", "json": json_medium},
         }
         assert _select_largest_model_json(data) == json_medium
 
@@ -516,6 +622,123 @@ class TestSelectLargestModelJson:
     def test_returns_none_when_json_missing(self, tmp_path):
         data = SpeechData()
         data.whisper_transcripts = {
-            "small": {"txt": tmp_path / "small.txt", "json": None},
+            "small": {"txt": tmp_path / "whisper_small.txt", "json": None},
         }
         assert _select_largest_model_json(data) is None
+
+
+# ---------------------------------------------------------------------------
+# _clean_llm_output
+# ---------------------------------------------------------------------------
+
+class TestCleanLlmOutput:
+    def test_strips_separator_lines(self):
+        text = "Hello world\n---\nMore text\n---"
+        assert _clean_llm_output(text) == "Hello world\nMore text"
+
+    def test_strips_markdown_headers(self):
+        text = "## Merged Transcript\nHello world"
+        assert _clean_llm_output(text) == "Hello world"
+
+    def test_preserves_normal_text(self):
+        text = "Hello world.\nThis is fine.\nAll good."
+        assert _clean_llm_output(text) == text
+
+    def test_strips_multiple_artifact_types(self):
+        text = "---\n# Header\nHello\n***\nWorld\n==="
+        assert _clean_llm_output(text) == "Hello\nWorld"
+
+    def test_handles_empty_input(self):
+        assert _clean_llm_output("") == ""
+        assert _clean_llm_output("  \n  ") == ""
+
+    def test_preserves_hyphens_in_words(self):
+        """Hyphens within words should not be stripped."""
+        text = "well-known fact\nself-driving car"
+        assert _clean_llm_output(text) == text
+
+    def test_preserves_short_dashes(self):
+        """Short dashes (1-2 chars) are not separators."""
+        text = "Hello - world\nA -- B"
+        assert _clean_llm_output(text) == text
+
+
+# ---------------------------------------------------------------------------
+# detect_repetition_loops
+# ---------------------------------------------------------------------------
+
+class TestDetectRepetitionLoops:
+    def test_detects_simple_repeat(self):
+        text = "hello hello hello hello world"
+        loops = detect_repetition_loops(text, min_repeats=4)
+        assert len(loops) == 1
+        assert loops[0]["phrase"] == "hello"
+        assert loops[0]["count"] == 4
+
+    def test_detects_multiword_phrase(self):
+        text = "It is not. It is not. It is not. It is not. Then something else."
+        loops = detect_repetition_loops(text, min_repeats=4)
+        assert len(loops) == 1
+        assert loops[0]["phrase"] == "It is not."
+        assert loops[0]["count"] == 4
+
+    def test_no_detection_below_threshold(self):
+        text = "hello hello hello world"
+        loops = detect_repetition_loops(text, min_repeats=4)
+        assert len(loops) == 0
+
+    def test_preserves_non_repetitive_text(self):
+        text = "The quick brown fox jumps over the lazy dog"
+        loops = detect_repetition_loops(text)
+        assert len(loops) == 0
+
+    def test_large_repeat_count(self):
+        text = "It is not. " * 63 + "Something else."
+        loops = detect_repetition_loops(text, min_repeats=4)
+        assert len(loops) == 1
+        assert loops[0]["count"] == 63
+
+    def test_multiple_loops_in_text(self):
+        text = "ok ok ok ok ok then hello hello hello hello"
+        loops = detect_repetition_loops(text, min_repeats=4)
+        assert len(loops) == 2
+        phrases = {l["phrase"] for l in loops}
+        assert phrases == {"ok", "hello"}
+
+
+# ---------------------------------------------------------------------------
+# collapse_repetition_loops
+# ---------------------------------------------------------------------------
+
+class TestCollapseRepetitionLoops:
+    def test_collapses_to_two_occurrences(self):
+        text = "before " + "repeat " * 10 + "after"
+        result, loops = collapse_repetition_loops(text, min_repeats=4)
+        assert loops[0]["count"] == 10
+        assert result.count("repeat") == 2
+        assert "before" in result
+        assert "after" in result
+
+    def test_returns_loops_metadata(self):
+        text = "It is not. " * 20 + "End."
+        result, loops = collapse_repetition_loops(text, min_repeats=4)
+        assert len(loops) == 1
+        assert loops[0]["phrase"] == "It is not."
+        assert loops[0]["count"] == 20
+
+    def test_no_change_for_clean_text(self):
+        text = "The quick brown fox jumps over the lazy dog"
+        result, loops = collapse_repetition_loops(text)
+        assert result == text
+        assert loops == []
+
+    def test_multiword_collapse(self):
+        text = "start oh no oh no oh no oh no oh no end"
+        result, loops = collapse_repetition_loops(text, min_repeats=4)
+        assert loops[0]["phrase"] == "oh no"
+        # Should have exactly 2 "oh no" remaining
+        assert result.count("oh no") == 2
+        assert result.startswith("start")
+        assert result.endswith("end")
+
+

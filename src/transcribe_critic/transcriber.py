@@ -52,11 +52,88 @@ from transcribe_critic import __version__
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
+    AUDIO_MP3, AUDIO_WAV, CAPTIONS_VTT, WHISPER_MERGED_TXT,
+    DIARIZATION_JSON, DIARIZED_TXT, TRANSCRIPT_MERGED_TXT,
+    ANALYSIS_MD, SLIDE_TIMESTAMPS_JSON,
     run_command, _print_reusing, _dry_run_skip, _should_skip,
     _collect_source_paths, check_dependencies,
 )
 
 SECTION_SEPARATOR = "=" * 50
+
+# Valid pipeline step names
+VALID_STEPS = {"download", "transcribe", "ensemble", "diarize", "slides", "merge", "markdown", "analysis"}
+
+
+def _should_run_step(step_name: str, config: SpeechConfig) -> bool:
+    """Check if a pipeline step should run based on --steps filter."""
+    if config.steps is None:
+        return True
+    return step_name in config.steps
+
+
+def _hydrate_data(config: SpeechConfig, data: SpeechData) -> None:
+    """Populate SpeechData from existing files on disk.
+
+    Called when --steps is used so that later steps can find outputs
+    from earlier steps that were skipped in this run.
+    """
+    d = config.output_dir
+
+    # Audio
+    for name in (AUDIO_MP3, AUDIO_WAV):
+        p = d / name
+        if p.exists():
+            data.audio_path = p
+            break
+
+    # Captions
+    cap = d / CAPTIONS_VTT
+    if cap.exists():
+        data.captions_path = cap
+
+    # Whisper model transcripts
+    for txt in sorted(d.glob("whisper_*.txt")):
+        name = txt.stem  # e.g. "whisper_medium"
+        if name == "whisper_merged":
+            continue
+        model = name.removeprefix("whisper_")
+        json_path = d / f"whisper_{model}.json"
+        data.whisper_transcripts[model] = {
+            "txt": txt,
+            "json": json_path if json_path.exists() else None,
+        }
+
+    # Whisper merged (primary transcript when ensembling)
+    merged = d / WHISPER_MERGED_TXT
+    if merged.exists():
+        data.transcript_path = merged
+    elif data.whisper_transcripts:
+        # Fall back to largest single model
+        from transcribe_critic.shared import MODEL_SIZES
+        for size in MODEL_SIZES:
+            if size in data.whisper_transcripts:
+                data.transcript_path = data.whisper_transcripts[size]["txt"]
+                break
+
+    # Transcript JSON (use largest model's JSON for timestamps)
+    if data.whisper_transcripts:
+        from transcribe_critic.shared import MODEL_SIZES
+        for size in MODEL_SIZES:
+            if size in data.whisper_transcripts:
+                data.transcript_json_path = data.whisper_transcripts[size].get("json")
+                break
+
+    # Diarization
+    diar_txt = d / DIARIZED_TXT
+    if diar_txt.exists():
+        data.diarization_path = diar_txt
+
+    # Merged transcript
+    tm = d / TRANSCRIPT_MERGED_TXT
+    if tm.exists():
+        data.merged_transcript_path = tm
+
 
 # API pricing per 1K tokens, keyed by model family prefix (as of 2025-05)
 MODEL_PRICING = {
@@ -261,7 +338,7 @@ def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
         print("  No YouTube captions, external transcript, or diarization available, skipping merge")
         return
 
-    merged_path = config.output_dir / "transcript_merged.txt"
+    merged_path = config.output_dir / TRANSCRIPT_MERGED_TXT
 
     merge_inputs = _collect_source_paths(config, data)
     if _should_skip(config, merged_path, "merge transcript sources", *merge_inputs):
@@ -376,8 +453,8 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     print()
     print("[6] Analyzing source survival...")
 
-    merged_path = config.output_dir / "transcript_merged.txt"
-    analysis_path = config.output_dir / "analysis.md"
+    merged_path = config.output_dir / TRANSCRIPT_MERGED_TXT
+    analysis_path = config.output_dir / ANALYSIS_MD
 
     if not merged_path.exists():
         if config.dry_run:
@@ -402,11 +479,11 @@ def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     # Collect sources
     sources = []
 
-    # Whisper (ensembled or single model)
+    # Whisper (merged from multiple models, or single model)
     if data.transcript_path and data.transcript_path.exists():
         with open(data.transcript_path, 'r') as f:
             whisper_text = f.read()
-        label = "ensembled" if "ensembled" in data.transcript_path.name else data.transcript_path.stem
+        label = "whisper_merged" if WHISPER_MERGED_TXT in data.transcript_path.name else data.transcript_path.stem
         sources.append((f"Whisper ({label})", whisper_text))
 
     # YouTube captions
@@ -563,6 +640,10 @@ Examples:
 
     # Pipeline control
     pipeline_group = parser.add_argument_group("pipeline")
+    pipeline_group.add_argument("--steps",
+                        help="Run only these pipeline steps (comma-separated). "
+                             "Steps: download, transcribe, ensemble, diarize, slides, merge, markdown, analysis. "
+                             "Implies --force for listed steps. Existing outputs are used for skipped steps.")
     pipeline_group.add_argument("--force", action="store_true",
                         help="Re-download/process even if files already exist")
     pipeline_group.add_argument("--dry-run", action="store_true",
@@ -625,6 +706,16 @@ Examples:
     # Determine LLM backend: --api or --api-key switches to cloud API
     use_api = args.api or bool(args.api_key)
 
+    # Parse --steps
+    steps = None
+    if args.steps:
+        steps = [s.strip() for s in args.steps.split(",")]
+        invalid = set(steps) - VALID_STEPS
+        if invalid:
+            print(f"Invalid step(s): {', '.join(sorted(invalid))}")
+            print(f"Valid steps: {', '.join(sorted(VALID_STEPS))}")
+            sys.exit(1)
+
     # Podcast mode implies --no-slides
     no_slides = args.no_slides or args.podcast
 
@@ -648,7 +739,8 @@ Examples:
         ollama_base_url=args.ollama_url,
         api_key=args.api_key,
         claude_model=args.claude_model,
-        skip_existing=not args.force,
+        steps=steps,
+        skip_existing=not args.force if not steps else False,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
@@ -726,15 +818,28 @@ Examples:
         print(SECTION_SEPARATOR)
 
     try:
+        # Hydrate data from existing files when running selective steps
+        if config.steps:
+            _hydrate_data(config, data)
+            print(f"  Running steps: {', '.join(config.steps)}")
+            print()
+
         # Run pipeline — each stage skips if output already exists
-        download_media(config, data, info=media_info)
+        if _should_run_step("download", config):
+            download_media(config, data, info=media_info)
 
-        transcribe_audio(config, data)
+        if _should_run_step("transcribe", config):
+            transcribe_audio(config, data)
 
-        if config.diarize:
+        # Ensemble can be re-run independently of transcription
+        if _should_run_step("ensemble", config) and not _should_run_step("transcribe", config):
+            from transcribe_critic.transcription import _ensemble_whisper_transcripts
+            _ensemble_whisper_transcripts(config, data)
+
+        if config.diarize and _should_run_step("diarize", config):
             diarize_audio(config, data)
 
-        if not config.no_slides:
+        if not config.no_slides and _should_run_step("slides", config):
             extract_slides(config, data)
 
             if config.analyze_slides:
@@ -743,10 +848,14 @@ Examples:
                 create_basic_slides_json(config, data)
 
         # Merge transcript sources if requested
-        merge_transcript_sources(config, data)
+        if _should_run_step("merge", config):
+            merge_transcript_sources(config, data)
 
-        generate_markdown(config, data)
-        analyze_source_survival(config, data)
+        if _should_run_step("markdown", config):
+            generate_markdown(config, data)
+
+        if _should_run_step("analysis", config):
+            analyze_source_survival(config, data)
 
         # Summary
         print()
@@ -769,7 +878,7 @@ Examples:
                 if paths.get("txt") and paths["txt"].exists():
                     print(f"  - {paths['txt'].name} (Whisper {model})")
         if data.transcript_path and data.transcript_path.exists():
-            label = "ensembled transcript" if len(data.whisper_transcripts) > 1 else "transcript"
+            label = "whisper-merged transcript" if len(data.whisper_transcripts) > 1 else "transcript"
             print(f"  - {data.transcript_path.name} ({label})")
         if data.transcript_json_path and data.transcript_json_path.exists():
             print(f"  - {data.transcript_json_path.name} (transcript with timestamps)")
@@ -779,14 +888,14 @@ Examples:
             print(f"  - {data.merged_transcript_path.name} (merged from YouTube + Whisper)")
         if data.slides_dir and data.slides_dir.exists():
             print(f"  - slides/ ({len(data.slide_images)} images)")
-        timestamps_file = config.output_dir / "slide_timestamps.json"
+        timestamps_file = config.output_dir / SLIDE_TIMESTAMPS_JSON
         if timestamps_file.exists():
             print(f"  - slide_timestamps.json")
         if data.slides_json_path and data.slides_json_path.exists():
             print(f"  - {data.slides_json_path.name}")
         if data.markdown_path and data.markdown_path.exists():
             print(f"  - {data.markdown_path.name}")
-        analysis_file = config.output_dir / "analysis.md"
+        analysis_file = config.output_dir / ANALYSIS_MD
         if analysis_file.exists():
             print(f"  - {analysis_file.name} (source survival analysis)")
 

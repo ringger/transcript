@@ -500,7 +500,7 @@ class TestRunPyannoteSteps:
         pipeline = _make_mock_pipeline()
         config = SpeechConfig(url="test", output_dir=tmp_path)
         data = SpeechData()
-        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path = tmp_path / "audio.wav"
         data.audio_path.touch()
 
         _run_pyannote_steps(config, data, pipeline)
@@ -532,7 +532,7 @@ class TestRunPyannoteSteps:
         pipeline = _make_mock_pipeline()
         config = SpeechConfig(url="test", output_dir=tmp_path)
         data = SpeechData()
-        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path = tmp_path / "audio.wav"
         data.audio_path.touch()
 
         time.sleep(0.05)
@@ -564,7 +564,7 @@ class TestRunPyannoteSteps:
         pipeline = _make_mock_pipeline()
         config = SpeechConfig(url="test", output_dir=tmp_path)
         data = SpeechData()
-        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path = tmp_path / "audio.wav"
         data.audio_path.touch()
 
         time.sleep(0.05)
@@ -614,7 +614,7 @@ class TestRunPyannoteSteps:
         time.sleep(0.05)
 
         # Create audio AFTER cache (makes cache stale)
-        data.audio_path = tmp_path / "audio.mp3"
+        data.audio_path = tmp_path / "audio.wav"
         data.audio_path.touch()
 
         _run_pyannote_steps(config, data, pipeline)

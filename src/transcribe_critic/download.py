@@ -12,6 +12,7 @@ from pathlib import Path
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData,
+    AUDIO_MP3, METADATA_JSON, CAPTIONS_VTT,
     run_command, _save_json, _print_reusing, _dry_run_skip,
 )
 
@@ -23,8 +24,14 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
 
     output_template = str(config.output_dir / "%(title)s.%(ext)s")
 
-    # Get video info first to extract title (skip if pre-fetched)
-    if info is None:
+    # Get video info first to extract title (skip if pre-fetched or cached)
+    metadata_path = config.output_dir / METADATA_JSON
+    if info is None and config.skip_existing and metadata_path.exists():
+        # Reuse cached metadata (avoids yt-dlp call on re-runs and eval)
+        with open(metadata_path) as f:
+            info = json.load(f)
+        print("  Reusing cached metadata")
+    elif info is None:
         print("  Fetching video info...")
         result = run_command(
             ["yt-dlp", "--dump-json", config.url],
@@ -36,8 +43,7 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
 
     print(f"  Title: {data.title}")
 
-    # Save source metadata
-    metadata_path = config.output_dir / "metadata.json"
+    # Save source metadata (metadata_path already set above)
     if config.dry_run:
         print(f"  [dry-run] Would save metadata → {metadata_path.name}")
     elif not metadata_path.exists() or not config.skip_existing:
@@ -60,10 +66,10 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
             data.metadata = json.load(f)
 
     # Download audio
-    audio_path = config.output_dir / "audio.mp3"
+    audio_path = config.output_dir / AUDIO_MP3
     if config.skip_existing and audio_path.exists():
         _print_reusing(audio_path.name)
-    elif not _dry_run_skip(config, "download audio", "audio.mp3"):
+    elif not _dry_run_skip(config, "download audio", AUDIO_MP3):
         print("  Downloading audio...")
         run_command(
             ["yt-dlp", "-x", "--audio-format", "mp3",
@@ -92,12 +98,12 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
         data.video_path = video_path
 
     # Download captions if available (skip for podcasts — no captions)
-    captions_path = config.output_dir / "captions.en.vtt"
+    captions_path = config.output_dir / CAPTIONS_VTT
     if config.podcast:
         print("  Skipping captions download (--podcast)")
     elif config.skip_existing and captions_path.exists():
         _print_reusing(captions_path.name)
-    elif not _dry_run_skip(config, "download captions", "captions.en.vtt"):
+    elif not _dry_run_skip(config, "download captions", CAPTIONS_VTT):
         print("  Downloading captions (if available)...")
         try:
             run_command(

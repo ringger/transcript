@@ -55,10 +55,13 @@ class SpeechConfig:
     diarize: bool = False  # Enable speaker diarization via pyannote
     num_speakers: Optional[int] = None  # Exact speaker count hint for diarization
     speaker_names: Optional[list] = None  # Manual speaker name mapping (ordered by first appearance)
+    steps: Optional[list] = None  # Run only these pipeline steps (None = all)
     dry_run: bool = False  # Show what would be done without doing it
     verbose: bool = False
     # Merge tuning
-    merge_chunk_words: int = 500  # Words per chunk for merge API calls
+    merge_chunk_words: int = 500  # Words per chunk for merge API calls (multi-source merge)
+    merge_diff_context_words: int = 30  # Words of context around each diff (Whisper ensembling)
+    merge_max_diffs_per_call: int = 50  # Max diffs per LLM call (Whisper ensembling)
     api_max_retries: int = 5
     api_initial_backoff: int = 5  # seconds
     api_timeout: float = 120.0  # seconds per API attempt
@@ -69,6 +72,21 @@ class SpeechConfig:
     ollama_base_url: str = "http://localhost:11434/v1/"
 
 
+# Standard output filenames — single source of truth
+AUDIO_MP3 = "audio.mp3"
+AUDIO_WAV = "audio.wav"
+METADATA_JSON = "metadata.json"
+CAPTIONS_VTT = "captions.en.vtt"
+WHISPER_MERGED_TXT = "whisper_merged.txt"
+DIARIZATION_JSON = "diarization.json"
+DIARIZED_TXT = "diarized.txt"
+TRANSCRIPT_MERGED_TXT = "transcript_merged.txt"
+ANALYSIS_MD = "analysis.md"
+TRANSCRIPT_MD = "transcript.md"
+SLIDE_TIMESTAMPS_JSON = "slide_timestamps.json"
+SLIDES_TRANSCRIPT_JSON = "slides_transcript.json"
+
+
 @dataclass
 class SpeechData:
     """Data collected during pipeline execution."""
@@ -76,7 +94,7 @@ class SpeechData:
     audio_path: Optional[Path] = None
     video_path: Optional[Path] = None
     captions_path: Optional[Path] = None
-    transcript_path: Optional[Path] = None  # Primary transcript (or ensembled)
+    transcript_path: Optional[Path] = None  # Primary transcript (or whisper_merged)
     transcript_json_path: Optional[Path] = None  # JSON with timestamps
     whisper_transcripts: dict = field(default_factory=dict)  # {model: path} for each model
     merged_transcript_path: Optional[Path] = None  # Merged from multiple sources

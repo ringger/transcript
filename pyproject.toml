@@ -32,13 +32,22 @@ dependencies = [
 
 [project.optional-dependencies]
 diarize = ["pyannote.audio"]
+eval = [
+    "meeteval",
+    "datasets",
+    "soundfile",
+]
 dev = [
     "pytest",
     "pyannote.audio",
+    "meeteval",
+    "datasets",
+    "soundfile",
 ]
 
 [project.scripts]
 transcribe-critic = "transcribe_critic.transcriber:main"
+transcribe-critic-eval = "transcribe_critic.eval:main"
 
 [project.urls]
 Homepage = "https://pypi.org/project/transcribe-critic/"

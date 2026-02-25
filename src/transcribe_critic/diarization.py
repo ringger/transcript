@@ -14,6 +14,7 @@ import numpy as np
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData,
+    DIARIZATION_JSON, DIARIZED_TXT,
     create_llm_client, llm_call_with_retry,
     is_up_to_date, _save_json, _should_skip,
 )
@@ -30,8 +31,8 @@ def diarize_audio(config: SpeechConfig, data: SpeechData) -> None:
     print()
     print("[2b] Diarizing audio...")
 
-    diarization_json = config.output_dir / "diarization.json"
-    diarized_txt = config.output_dir / "diarized.txt"
+    diarization_json = config.output_dir / DIARIZATION_JSON
+    diarized_txt = config.output_dir / DIARIZED_TXT
 
     if _should_skip(config, diarized_txt, "diarize audio", data.audio_path):
         if diarized_txt.exists():

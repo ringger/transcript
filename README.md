@@ -13,10 +13,11 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 - **Critical text merging**: Combines 2–3+ transcript sources into the most accurate version using blind, anonymous presentation to an LLM — no source receives preferential treatment
 - **wdiff-based alignment**: Uses longest common subsequence alignment (via `wdiff`) to keep chunks properly aligned across sources of different lengths, replacing naive proportional slicing
 - **Multi-model Whisper ensembling**: Runs multiple Whisper models (e.g., small + medium) and resolves disagreements via LLM
+- **Hallucination detection**: Automatically detects and collapses Whisper repetition loops (e.g., a phrase repeated 60+ times) in both raw outputs and merged transcripts
 - **External transcript support**: Merges in human-edited transcripts (e.g., from publisher websites) as an additional source
 - **Structured transcript preservation**: When external transcripts have speaker labels and timestamps, the merged output preserves that structure
 - **Slide extraction and analysis**: Automatic scene detection for presentation slides, with optional vision API descriptions
-- **Make-style DAG pipeline**: Each stage checks whether its outputs are newer than its inputs, skipping unnecessary work
+- **Make-style DAG pipeline**: Each stage checks whether its outputs are newer than its inputs, skipping unnecessary work — `--steps` allows re-running specific stages in isolation
 - **Checkpoint resumption**: Long operations save checkpoints and resume after interruption — merge chunks, diarization segmentation, and embedding extraction all checkpoint independently
 - **Cost estimation**: Shows estimated API costs before running (`--dry-run` for estimation only)
 - **Local-first LLM**: Uses Ollama by default for free, local operation — no API key needed
@@ -136,6 +137,12 @@ transcribe-critic "https://youtube.com/watch?v=..." --scene-threshold 0.15
 # Force re-processing (ignore existing files)
 transcribe-critic "https://youtube.com/watch?v=..." --force
 
+# Re-run only the merge step (uses existing Whisper outputs)
+transcribe-critic "https://youtube.com/watch?v=..." --steps merge -o ./my_transcript
+
+# Re-run transcription and merge only
+transcribe-critic "https://youtube.com/watch?v=..." --steps transcribe,merge -o ./my_transcript
+
 # Verbose output
 transcribe-critic "https://youtube.com/watch?v=..." -v
 ```
@@ -149,10 +156,11 @@ output_dir/
 ├── audio.wav                     # Converted for diarization (if --diarize)
 ├── video.mp4                     # Downloaded video (if slides enabled)
 ├── captions.en.vtt               # YouTube captions (if available)
-├── small.txt                     # Whisper small transcript
-├── medium.txt                    # Whisper medium transcript
-├── ensembled.txt                 # Ensembled from multiple Whisper models
-├── medium.json                   # Transcript with timestamps
+├── whisper_small.txt              # Whisper small transcript
+├── whisper_small.json             # Whisper small with timestamps
+├── whisper_medium.txt             # Whisper medium transcript
+├── whisper_medium.json            # Whisper medium with timestamps
+├── whisper_merged.txt             # Merged from multiple Whisper models via adjudication
 ├── diarization.json              # Speaker segments (if --diarize)
 ├── diarization_segmentation.npy  # Cached segmentation (if --diarize)
 ├── diarization_embeddings.npy    # Cached embeddings (if --diarize)
@@ -175,16 +183,18 @@ output_dir/
 
 Optional stages are skipped based on flags. Stage numbers are fixed regardless of which stages run.
 
-| Stage | Tool | Optional |
-|-------|------|----------|
-| [1] Download media | yt-dlp | No |
-| [2] Transcribe audio | mlx-whisper | No |
-| [2b] Speaker diarization | pyannote.audio | Yes (`--diarize`) |
-| [3] Extract slides | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
-| [4] Analyze slides with vision | LLM + vision | Yes (`--analyze-slides`) |
-| [4b] Merge transcript sources | LLM + wdiff | Yes (on by default; `--no-merge` to skip) |
-| [5] Generate markdown | Python | No |
-| [6] Source survival analysis | wdiff | No |
+| Stage | Step name | Tool | Optional |
+|-------|-----------|------|----------|
+| [1] Download media | `download` | yt-dlp | No |
+| [2] Transcribe audio | `transcribe` | mlx-whisper | No |
+| [2b] Speaker diarization | `diarize` | pyannote.audio | Yes (`--diarize`) |
+| [3] Extract slides | `slides` | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
+| [4] Analyze slides with vision | `slides` | LLM + vision | Yes (`--analyze-slides`) |
+| [4b] Merge transcript sources | `merge` | LLM + wdiff | Yes (on by default; `--no-merge` to skip) |
+| [5] Generate markdown | `markdown` | Python | No |
+| [6] Source survival analysis | `analysis` | wdiff | No |
+
+Use `--steps <step1>,<step2>,...` to run only specific stages. Existing outputs from skipped stages are loaded automatically. This is useful for re-running just the merge after fixing a bug, without re-downloading or re-transcribing.
 
 ## How It Works
 
@@ -204,12 +214,12 @@ Unlike a traditional critical edition, the pipeline does not produce an apparatu
 
 ### Source Survival Analysis
 
-After merging, `wdiff -s` compares each source against the merged output, showing how much each source contributed to the final text. Here is an actual survival analysis from a 3-hour podcast episode transcribed with Whisper (small + medium ensembled), YouTube auto-captions, and a human-edited external transcript:
+After merging, `wdiff -s` compares each source against the merged output, showing how much each source contributed to the final text. Here is an actual survival analysis from a 3-hour podcast episode transcribed with Whisper (small + medium, merged via adjudication), YouTube auto-captions, and a human-edited external transcript:
 
 ```
 Source                       Words   Common  Output Coverage  Retention
 ------------------------- -------- -------- --------------- ----------
-Whisper (ensembled)         28,277   27,441             90%        97%
+Whisper (merged)            28,277   27,441             90%        97%
 YouTube captions            30,668   28,741             94%        94%
 External transcript         33,122   30,245             99%        91%
 Merged output               30,524
@@ -231,15 +241,15 @@ Here are specific corrections the merge made by adjudicating across sources:
 
 Each source alone gets some things right and others wrong. Whisper hallucinates proper nouns ("Cloud" for "Claude", "Douthend" for "Douthat"). YouTube captions lack capitalization and punctuation but sometimes have correct spellings. The external transcript has the best proper nouns but may paraphrase or omit filler words. The merge selects the best reading at each disagreement, producing a transcript more accurate than any individual source.
 
-### Multi-Model Ensembling
+### Multi-Model Whisper Merging
 
 When using multiple Whisper models (default: `small,medium`):
 
 1. Runs each model independently
 2. Uses `wdiff` to identify differences (normalized: no caps, no punctuation)
-3. Claude resolves disagreements, preferring real words over transcription errors and proper nouns over generic alternatives
+3. An LLM adjudicates disagreements, preferring real words over transcription errors and proper nouns over generic alternatives
 
-Ensembling is part of the same witness-and-adjudicate process as the critical text merge — multiple Whisper models are simply additional witnesses alongside captions and external transcripts. The implementation runs Whisper-vs-Whisper adjudication first to produce a single ensembled witness, but the principle is the same throughout.
+This is the same witness-and-adjudicate process as the multi-source critical text merge — multiple Whisper models are simply additional witnesses alongside captions and external transcripts. The implementation runs Whisper-vs-Whisper adjudication first to produce a single merged Whisper witness (`whisper_merged.txt`), which then enters the multi-source merge alongside captions and external transcripts.
 
 ### Speaker Diarization
 
