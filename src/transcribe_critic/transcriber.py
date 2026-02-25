@@ -696,7 +696,7 @@ Examples:
 
     # Parse whisper models (comma-separated)
     whisper_models = [m.strip() for m in args.whisper_models.split(",")]
-    valid_models = ["tiny", "base", "small", "medium", "large"]
+    valid_models = ["tiny", "base", "small", "medium", "large", "distil-large-v3"]
     for m in whisper_models:
         if m not in valid_models:
             print(f"Invalid Whisper model: {m}")

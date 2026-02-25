@@ -698,7 +698,11 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
     print(f"  Running Whisper {model}...")
 
     if deps["mlx_whisper"]:
-        model_name = f"mlx-community/whisper-{model}-mlx"
+        # Map model short names to mlx-community HuggingFace model IDs
+        MLX_MODEL_MAP = {
+            "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+        }
+        model_name = MLX_MODEL_MAP.get(model, f"mlx-community/whisper-{model}-mlx")
 
         # mlx_whisper outputs to input filename, so we need to work around this
         # Run transcription

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from transcribe_critic.shared import DIARIZATION_JSON, WHISPER_MERGED_TXT, TRANSCRIPT_MERGED_TXT
+from transcribe_critic.shared import DIARIZATION_JSON, MODEL_SIZES, WHISPER_MERGED_TXT, TRANSCRIPT_MERGED_TXT
 from transcribe_critic.eval.convert import (
     hypothesis_to_stm, plain_text_to_stm, diarization_json_to_rttm,
 )
@@ -124,7 +124,7 @@ def _discover_hypotheses(output_dir: Path) -> list[tuple[str, Path]]:
     hypotheses = []
 
     # Individual Whisper model outputs
-    for model in ("tiny", "base", "small", "medium", "large"):
+    for model in MODEL_SIZES:
         txt = output_dir / f"whisper_{model}.txt"
         if txt.exists():
             hypotheses.append((f"whisper_{model}", txt))

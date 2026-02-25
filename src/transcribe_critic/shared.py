@@ -33,7 +33,7 @@ def tprint(*args, **kwargs):
 print = tprint
 
 # Whisper model sizes in descending quality order (used for base-model selection)
-MODEL_SIZES = ["large", "medium", "small", "base", "tiny"]
+MODEL_SIZES = ["large", "distil-large-v3", "medium", "small", "base", "tiny"]
 
 
 @dataclass

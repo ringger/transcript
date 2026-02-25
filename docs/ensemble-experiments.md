@@ -1,84 +1,44 @@
-# Rev16 Test1: Whisper Ensemble Experiment Results
+# Whisper Ensemble Experiment Results
 
 ## Dataset
 
-Three files from Rev16 evaluated against reference transcripts using meeteval cpWER.
+Three files from Rev16 evaluated against reference transcripts using meeteval WER.
 
-## Baseline: Individual Whisper Models
+## Current Best Results
 
-| File | whisper_small | whisper_medium |
-|------|--------------|----------------|
-| 3    | 29.8%        | 28.9%          |
-| 4    | 36.0%        | 27.9%          |
-| 9    | 25.1%        | 24.8%          |
-| **Avg** | **30.3%**  | **27.2%**      |
+| File | small | medium | distil-large-v3 | 2-way merged (s+m) | 3-way merged |
+|------|-------|--------|-----------------|-------------------|--------------|
+| 3 | 31.5% | 29.5% | 29.6% | **28.5%** | 29.4% |
+| 4 | 31.3% | 29.2% | 27.6% | 28.2% | 28.5% |
+| 9 | 24.1% | 24.5% | 21.6% | 23.1% | 21.7% |
+| **Avg** | **28.9%** | **27.7%** | **26.3%** | **26.6%** | **26.5%** |
 
-## Current Best Results (Sonnet + A/B format + anti-hallucination flags)
+Best single model: distil-large-v3 (26.3%). Best ensemble: 2-way small+medium (26.6%). 3-way ensemble (26.5%) doesn't improve over distil-large-v3 alone — weaker models dilute its advantage on files where it's clearly better.
 
-| File | small | medium | merged | Gap to medium |
-|------|-------|--------|--------|---------------|
-| 3 | 31.5% | 29.5% | **28.5%** | -1.0pp |
-| 4 | 31.3% | 29.2% | **28.2%** | -1.0pp |
-| 9 | 24.1% | 24.5% | **23.1%** | -1.4pp |
-| **Avg** | **28.9%** | **27.7%** | **26.6%** | **-1.1pp** |
-
-The ensemble beats medium by 1.1pp on average, consistent across all 3 files.
+All results use anti-hallucination flags and Sonnet adjudicator.
 
 ## Experiment History
 
-### 1. Chunk-Rewrite Approach (original)
+### 1–9. Architecture and Prompt Evolution
 
-Split base (medium) transcript into ~500-word chunks, sent each with the other transcript for LLM rewriting. Problems: chunk-boundary duplication, errors in uncontested regions, wasted tokens, base-model bias.
+Started with chunk-rewrite (LLM rewrites 500-word chunks), which introduced errors in uncontested regions. Refactored to targeted diff resolution: wdiff finds disagreements, cluster nearby diffs, LLM resolves only the disagreements. Tested with local qwen2.5:7b and 14b — both degraded results due to format leakage (7b) or poor choices (14b).
 
-**File 3 WER:** 30.9%
-
-### 2. Targeted Diff Resolution (refactor)
-
-Replaced chunk-rewrite with surgical approach: wdiff to find disagreements, cluster nearby diffs, LLM resolves only the disagreements, apply targeted replacements. Anonymous "Model A" / "Model B" labels.
-
-**File 3 WER:** 29.6%
-
-### 3. Format Leakage Fix
-
-Local qwen2.5:7b was leaking prompt formatting ("Model A", quoted phrases, "Decision:" prefixes) into output. Added `_clean_resolution()` to strip artifacts.
-
-**Avg WER:** 28.0% → 27.5% (-0.5pp)
-
-### 4–7. Prompt Tuning (all counterproductive with 7b)
-
-Tested: fixing a_pos→b_pos context alignment, "prefer Model B" variants with different label orderings. All performed worse than the anonymous baseline. The 7b model's apparent conservatism was later revealed to be parsing failure (~45% of responses unparsed, defaulting to base text).
+Key milestones:
+- **Targeted diff resolution** replaced chunk-rewrite (exp 2)
+- **`_clean_resolution()`** strips LLM format artifacts (exp 3)
+- **A/B choice format** replaced text-echo — eliminates invented words, 100% parse rate (exp 10)
+- **Bug fixes**: context indexed by wrong positions, clustering sort mismatch (exp 9)
 
 | Variant | File 3 WER | Parse Rate | Notes |
 |---------|-----------|-----------|-------|
-| Baseline (anonymous) | 29.1% | ~55% | Best with 7b |
-| a_pos→b_pos fix | 29.5% | ~55% | Misalignment helped accidentally |
-| "Prefer Model B" variants | 28.9–29.9% | 0–100% | Positional bias dominated |
+| Chunk-rewrite | 30.9% | — | Boundary duplication, uncontested errors |
+| 7b + text-echo | 29.1% | ~55% | Parsing failures masked as conservatism |
+| 14b + text-echo | 31.3% | 98% | More intervention ≠ better |
+| 14b + A/B format | 29.3% | 100% | Format solved, model quality the bottleneck |
 
-### 8. qwen2.5:14b (text-echo format)
+### 10. Claude Sonnet API
 
-Larger model found more diffs (1797 vs ~988) and resolved more (98% parse rate), but made worse choices. More intervention ≠ better intervention with unconstrained text output.
-
-**File 3 WER:** 31.3% (+2.4pp vs medium)
-
-### 9. Bug Fixes (a_pos→b_pos, clustering sort)
-
-Code audit revealed: context indexed by wrong positions, clustering/application sort mismatch. Fixed both. The b_pos fix alone didn't improve results (31.4%).
-
-### 10. A/B Choice Format + Few-Shot Example
-
-Key architectural change: LLM outputs "A" or "B" instead of echoing text. Eliminates format leakage, prevents inventing words, achieves 100% parse rate.
-
-| Variant | File 3 WER | Parse Rate | Gap to medium |
-|---------|-----------|-----------|---------------|
-| 7b + text-echo (old) | 29.1% | ~55% | +0.2pp |
-| 14b + text-echo | 31.3% | 98% | +2.4pp |
-| **14b + A/B format** | **29.3%** | **100%** | **+0.4pp** |
-
-Full 14b + A/B results: avg 27.4% (+0.2pp vs medium). Still worse than medium alone.
-
-### 11. Claude Sonnet API
-
-Switched to Claude Sonnet 4 via API. Added ensemble checkpointing (`ensemble_chunks/`) and retry-without-context for content refusals (Sonnet refused clusters containing offensive language; stripping context recovered most).
+Switched to Claude Sonnet 4 via API. Added checkpointing and retry-without-context for content refusals.
 
 | File | medium | 14b merged | Sonnet merged | Gap to medium |
 |------|--------|------------|---------------|---------------|
@@ -87,67 +47,59 @@ Switched to Claude Sonnet 4 via API. Added ensemble checkpointing (`ensemble_chu
 | 9 | 24.8% | 24.9% | **24.8%** | **0.0pp** |
 | **Avg** | **27.2%** | **27.4%** | **26.9%** | **-0.3pp** |
 
-**Key finding:** Model quality was the bottleneck. The diff resolution architecture and A/B format were necessary but not sufficient — a capable adjudicator model was also required.
+**Key finding:** Model quality was the bottleneck. The diff resolution architecture and A/B format were necessary but not sufficient — a capable adjudicator was also required.
 
-### 12. Whisper Large — Catastrophic Hallucination
+### 11. Whisper Large — Catastrophic Hallucination
 
-Added whisper large (via mlx-whisper) as a third model for 3-way adjudication with majority-vote signal. Extended the diff resolution code to merge pairwise diffs and present anonymous A/B/C choices.
+Whisper large (mlx-whisper) on file 3 produced "The unremarkable." repeated 7,479 times (97% WER). Root cause: `condition_on_previous_text=True` (default) creates a feedback loop. Large models are most susceptible.
 
-On file 3, whisper large produced 16,160 words — but 14,958 of those were the phrase "The unremarkable." repeated 7,479 times. After hallucination loop collapsing, only 1,198 words remained (vs ~24,000 from small/medium). The model effectively stopped transcribing after the first few minutes.
+### 12. Anti-Hallucination Flags
 
-| File | small | medium | large | 3-way merged | 2-way merged |
-|------|-------|--------|-------|--------------|--------------|
-| 3 | 29.8% | 28.9% | 97.0% | 29.0% | **28.3%** |
+Added flags to all Whisper runs: `condition_on_previous_text=False`, `no_speech_threshold=0.2`, `compression_ratio_threshold=2.0`, `hallucination_silence_threshold=3.0`.
 
-Using large as base (the default, since it's the "largest" model) dragged the merged result to 29.0% — worse than medium alone. The 3-way code works correctly, but garbage-in-garbage-out: a catastrophically broken base model poisons the ensemble.
-
-**Conclusion:** mlx-whisper large is unreliable on long audio (2+ hours). Staying with 2-way (small + medium) until a more robust large model is available. The 3-way adjudication code remains in place for future use.
-
-### 13. Anti-Hallucination Flags
-
-Added Whisper anti-hallucination flags to address the large model failure from experiment 12. These are applied to all model sizes:
-
-- `--condition-on-previous-text False` — breaks the feedback loop where one hallucinated window cascades into all subsequent windows
-- `--no-speech-threshold 0.2` — raises the bar for detecting speech vs silence
-- `--compression-ratio-threshold 2.0` — flags repetitive/compressed output
-- `--hallucination-silence-threshold 3.0` — detects hallucination during silent segments (requires `--word-timestamps True`)
-
-Re-ran the full 3-file eval with small + medium (2-way ensemble, Sonnet adjudicator) using the new flags.
-
-| File | small | medium | merged | Gap to medium |
-|------|-------|--------|--------|---------------|
-| 3 | 31.5% | 29.5% | **28.5%** | -1.0pp |
-| 4 | 31.3% | 29.2% | **28.2%** | -1.0pp |
-| 9 | 24.1% | 24.5% | **23.1%** | -1.4pp |
-| **Avg** | **28.9%** | **27.7%** | **26.6%** | **-1.1pp** |
-
-Comparison with pre-antihalluc results (experiment 11):
-
-| Metric | Before (test1) | After (antihalluc) | Change |
-|--------|---------------|-------------------|--------|
+| Metric | Before flags | After flags | Change |
+|--------|-------------|-------------|--------|
 | Medium avg | 27.2% | 27.7% | +0.5pp |
-| Merged avg | 26.9% | 26.6% | -0.3pp |
+| 2-way merged avg | 26.9% | 26.6% | -0.3pp |
 | Gap (merged vs medium) | -0.3pp | -1.1pp | -0.8pp |
 
-**Key finding:** The anti-hallucination flags slightly changed individual model WERs (some up, some down), but the ensemble's gap over medium widened dramatically from -0.3pp to -1.1pp. The merged result now consistently and substantially beats medium on every file. The flags appear to produce transcripts that differ in more meaningful ways, giving the adjudicator better signal.
+The flags changed individual WERs slightly, but the ensemble gap widened from -0.3pp to -1.1pp. The flags appear to produce transcripts that differ in more meaningful ways, giving the adjudicator better signal.
+
+### 13. distil-large-v3
+
+Replaced whisper large with `mlx-community/distil-whisper-large-v3` — a distilled model 6x faster than large-v3, within 1% WER, and specifically optimized to reduce hallucinations. No catastrophic failures (only minor hallucination loops of 8–10 words, caught by existing collapsing logic).
+
+**Standalone quality:** distil-large-v3 (26.3% avg) beats medium (27.7%) by 1.4pp and even beats the 2-way small+medium ensemble (26.6%) by 0.3pp.
+
+**3-way ensemble (small + medium + distil-large-v3):**
+
+| File | distil-large-v3 | 2-way merged | 3-way merged |
+|------|----------------|--------------|--------------|
+| 3 | 29.6% | **28.5%** | 29.4% |
+| 4 | **27.6%** | 28.2% | 28.5% |
+| 9 | **21.6%** | 23.1% | 21.7% |
+| **Avg** | **26.3%** | 26.6% | 26.5% |
+
+The 3-way ensemble doesn't improve over distil-large-v3 alone. On file 4, merging dragged 27.6% up to 28.5% by incorporating medium and small's worse readings. When one model is clearly better, ensembling with weaker models dilutes quality.
 
 ## Key Lessons
 
-1. **Constrain the output format.** Text-echo lets the LLM invent words and leak formatting. A/B choice is strictly better.
-2. **Parse rate ≠ quality.** The 7b model's 55% parse rate accidentally preserved base text; the 14b's 98% parse rate actively degraded it.
-3. **Model quality matters most.** Same architecture, same prompt — Sonnet beats medium by 0.3pp while 14b loses by 0.2pp.
-4. **Audit your baselines.** The 7b "conservatism" was a parsing bug, not a feature.
+1. **Constrain the output format.** A/B choice eliminates format leakage and invented words.
+2. **Model quality matters most.** Same architecture, same prompt — Sonnet succeeds where local models fail.
+3. **Ensembling helps when models are comparable.** 2-way small+medium ensemble beats medium by 1.1pp. But ensembling a strong model with weaker ones can hurt.
+4. **Anti-hallucination flags are essential.** They prevent catastrophic failures and improve ensemble signal.
+5. **distil-large-v3 is the best single model.** Faster than large, no hallucination, better WER than medium.
 
 ## Next Steps
 
-- Re-test whisper large with anti-hallucination flags for 3-way adjudication
+- Try 2-way ensemble: distil-large-v3 + medium (skip small, which is consistently weakest)
 - Expand eval to more Rev16 files for statistical significance
-- Test with a local model closer to Sonnet quality (e.g., Llama 3.3 70B via Ollama)
+- Test with a local adjudicator closer to Sonnet quality (e.g., Llama 3.3 70B)
 
 ## Environment
 
 - Hardware: M4 Max, 64GB RAM
 - LLM (local): Ollama qwen2.5:14b (9GB)
 - LLM (API): Claude Sonnet 4 (claude-sonnet-4-20250514)
-- Whisper models: small, medium
-- Scoring: meeteval cpWER
+- Whisper models: small, medium, distil-large-v3 (mlx-community/distil-whisper-large-v3)
+- Scoring: meeteval WER
