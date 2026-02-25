@@ -12,8 +12,8 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 
 - **Critical text merging**: Combines 2–3+ transcript sources into the most accurate version using blind, anonymous presentation to an LLM — no source receives preferential treatment
 - **wdiff-based alignment**: Uses longest common subsequence alignment (via `wdiff`) to keep chunks properly aligned across sources of different lengths, replacing naive proportional slicing
-- **Multi-model Whisper ensembling**: Runs multiple Whisper models (e.g., small + medium) and resolves disagreements via LLM
-- **Hallucination detection**: Automatically detects and collapses Whisper repetition loops (e.g., a phrase repeated 60+ times) in both raw outputs and merged transcripts
+- **Multi-model Whisper ensembling**: Runs multiple Whisper models (default: small + medium + distil-large-v3) and resolves disagreements via LLM with anonymous A/B/C labels
+- **Anti-hallucination**: Whisper runs use `condition_on_previous_text=False` and other flags to prevent cascading hallucination; residual repetition loops are automatically detected and collapsed
 - **External transcript support**: Merges in human-edited transcripts (e.g., from publisher websites) as an additional source
 - **Structured transcript preservation**: When external transcripts have speaker labels and timestamps, the merged output preserves that structure
 - **Slide extraction and analysis**: Automatic scene detection for presentation slides, with optional vision API descriptions
@@ -125,8 +125,8 @@ transcribe-critic "https://youtube.com/watch?v=..." --analyze-slides
 # Custom output directory
 transcribe-critic "https://youtube.com/watch?v=..." -o ./my_transcript
 
-# Use specific Whisper models
-transcribe-critic "https://youtube.com/watch?v=..." --whisper-models large
+# Use specific Whisper models (default: small,medium,distil-large-v3)
+transcribe-critic "https://youtube.com/watch?v=..." --whisper-models medium,distil-large-v3
 
 # Use a different local model
 transcribe-critic "https://youtube.com/watch?v=..." --local-model llama3.3
@@ -163,6 +163,8 @@ output_dir/
 ├── whisper_small.json             # Whisper small with timestamps
 ├── whisper_medium.txt             # Whisper medium transcript
 ├── whisper_medium.json            # Whisper medium with timestamps
+├── whisper_distil-large-v3.txt    # Whisper distil-large-v3 transcript
+├── whisper_distil-large-v3.json   # Whisper distil-large-v3 with timestamps
 ├── whisper_merged.txt             # Merged from multiple Whisper models via adjudication
 ├── diarization.json              # Speaker segments (if --diarize)
 ├── diarization_segmentation.npy  # Cached segmentation (if --diarize)
@@ -190,7 +192,7 @@ Optional stages are skipped based on flags. Stage numbers are fixed regardless o
 |-------|-----------|------|----------|
 | [1] Download media | `download` | yt-dlp | No |
 | [2] Transcribe audio | `transcribe` | mlx-whisper | No |
-| [2b] Whisper ensemble | `ensemble` | LLM + wdiff | Yes (on by default with 2+ models) |
+| [2b] Whisper ensemble | `ensemble` | LLM + wdiff | Yes (on by default with 2+ models; default: 3 models) |
 | [2c] Speaker diarization | `diarize` | pyannote.audio | Yes (`--diarize`) |
 | [3] Extract slides | `slides` | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
 | [4] Analyze slides with vision | `slides` | LLM + vision | Yes (`--analyze-slides`) |
@@ -247,13 +249,14 @@ Each source alone gets some things right and others wrong. Whisper hallucinates 
 
 ### Multi-Model Whisper Merging
 
-When using multiple Whisper models (default: `small,medium`):
+When using multiple Whisper models (default: `small,medium,distil-large-v3`):
 
-1. Runs each model independently
-2. Uses `wdiff` to identify specific word-level differences (normalized: no caps, no punctuation)
-3. Clusters nearby differences and presents each cluster to an LLM with anonymous labels ("A" / "B") and surrounding context
-4. The LLM picks A or B for each disagreement — constrained to choose between actual transcriptions, preventing hallucinated text
-5. Chosen readings are surgically applied to the base transcript, leaving uncontested regions untouched
+1. Runs each model independently with anti-hallucination flags
+2. Uses `wdiff` to identify specific word-level differences between each non-base model and the base (largest model)
+3. For 3+ models, merges pairwise diffs at the same positions into unified diffs with per-model readings
+4. Clusters nearby differences and presents each cluster to an LLM with anonymous labels (A/B or A/B/C) and surrounding context — model names are never revealed
+5. The LLM picks a letter for each disagreement — constrained to choose between actual transcriptions, preventing hallucinated text
+6. Chosen readings are surgically applied to the base transcript, leaving uncontested regions untouched
 
 This targeted diff resolution avoids the problems of full-text rewriting (chunk-boundary duplication, errors in uncontested regions, wasted tokens). The implementation runs Whisper-vs-Whisper adjudication first to produce a single merged Whisper witness (`whisper_merged.txt`), which then enters the multi-source merge alongside captions and external transcripts.
 
@@ -285,7 +288,7 @@ Every stage checks `is_up_to_date(output, *inputs)` — if the output file is ne
 ESTIMATED API COSTS
 ==================================================
   Source merging: 3 sources × 59 chunks = $1.03
-  Whisper ensemble: 2 models × 98 clusters = $0.72
+  Whisper ensemble: 3 models × 98 clusters = $0.72
 
   TOTAL: $1.95 (estimate)
 ==================================================
@@ -366,6 +369,7 @@ MIT
 ## Acknowledgments
 
 - [OpenAI Whisper](https://github.com/openai/whisper) — Speech recognition
+- [Distil-Whisper](https://github.com/huggingface/distil-whisper) — Distilled large-v3 model (faster, fewer hallucinations)
 - [MLX Whisper](https://github.com/ml-explore/mlx-examples) — Apple Silicon optimization
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — Media downloading
 - [Anthropic Claude](https://www.anthropic.com/) — LLM-based adjudication and vision analysis
