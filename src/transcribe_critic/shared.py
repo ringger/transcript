@@ -223,10 +223,13 @@ def llm_call_with_retry(client, config: SpeechConfig, **kwargs) -> object:
         model = config.local_model
         if _has_vision_content(kwargs.get("messages", [])):
             model = config.local_vision_model
+        messages = _convert_messages_to_openai(kwargs["messages"])
+        if "system" in kwargs and kwargs["system"]:
+            messages = [{"role": "system", "content": kwargs["system"]}] + messages
         openai_kwargs = {
             "model": model,
             "max_tokens": kwargs.get("max_tokens", 4096),
-            "messages": _convert_messages_to_openai(kwargs["messages"]),
+            "messages": messages,
         }
 
         def _call_openai():

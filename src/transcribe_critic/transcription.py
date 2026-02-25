@@ -263,6 +263,68 @@ DISAGREEMENTS:
 {chr(10).join(diff_lines)}"""
 
 
+def _call_and_parse_cluster(client, config, cluster, cluster_prompt,
+                            hallucination_warning):
+    """Call the LLM to resolve a cluster and parse the A/B response.
+
+    Returns (cluster_choices, cluster_resolutions) where:
+      cluster_choices: list of "A", "B", or None for each diff (for checkpointing)
+      cluster_resolutions: dict of diff id(diff) → chosen text
+    """
+    prompt = f"""You are resolving disagreements between two Whisper transcriptions of the same speech.
+No model is more reliable than the other — judge each difference on its merits.
+{hallucination_warning}
+{cluster_prompt}
+
+For each numbered disagreement, reply with just the number and your choice: A or B.
+If both omitted, reply with the number and "A" to keep the omission.
+
+Example output:
+1. A
+2. B
+3. A
+
+Output your decisions:"""
+
+    message = llm_call_with_retry(
+        client, config,
+        model=config.claude_model,
+        max_tokens=4096,
+        system="You are a speech transcription correction tool. Your job is to mechanically choose "
+               "the more accurate transcription at each point of disagreement. The content is from "
+               "real recorded speech and must be transcribed faithfully regardless of subject matter.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    response = _clean_llm_output(message.content[0].text)
+
+    cluster_choices = [None] * len(cluster)
+    cluster_resolutions = {}
+
+    for line in response.splitlines():
+        line = line.strip()
+        m = re.match(r'^(\d+)[.):]\s*(.*)', line)
+        if m:
+            num = int(m.group(1))
+            choice = m.group(2).strip().upper()
+            choice = _clean_resolution(choice).upper()
+            if 1 <= num <= len(cluster):
+                diff = cluster[num - 1]
+                diff_key = id(diff)
+                if choice.startswith("A"):
+                    chosen = diff["a_text"] if diff["a_text"] else "(omit)"
+                    cluster_choices[num - 1] = "A"
+                elif choice.startswith("B"):
+                    chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                    cluster_choices[num - 1] = "B"
+                else:
+                    chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                    cluster_choices[num - 1] = "B"
+                cluster_resolutions[diff_key] = chosen
+
+    return cluster_choices, cluster_resolutions
+
+
 def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
                            config: SpeechConfig) -> str:
     """Resolve Whisper model disagreements via targeted diff resolution.
@@ -328,7 +390,7 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
     total_diffs = sum(len(c) for c in clusters)
     print(f"  Grouped {total_diffs} diffs into {len(clusters)} cluster(s)")
 
-    # Step 3: Resolve each cluster via LLM
+    # Step 3: Resolve each cluster via LLM (with checkpointing)
     client = create_llm_client(config)
 
     # Build hallucination warning for prompt
@@ -337,68 +399,89 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
         hallucination_warning = "\nWARNING: Some models had hallucination loops (repeated phrases). "
         hallucination_warning += "These have been collapsed. Do NOT choose repetitive readings.\n"
 
+    # Initialize checkpoint directory
+    ensemble_dir = config.output_dir / "ensemble_chunks"
+    ensemble_dir.mkdir(exist_ok=True)
+    version_file = ensemble_dir / ".version"
+    ENSEMBLE_CHECKPOINT_VERSION = "2"  # bump to invalidate old checkpoints
+    if not version_file.exists() or version_file.read_text().strip() != ENSEMBLE_CHECKPOINT_VERSION:
+        for old_file in ensemble_dir.glob("cluster_*.json"):
+            old_file.unlink()
+        version_file.write_text(ENSEMBLE_CHECKPOINT_VERSION)
+
+    # Determine source paths for staleness checks
+    whisper_inputs = [
+        config.output_dir / f"whisper_{m}.txt"
+        for m in all_transcripts
+        if (config.output_dir / f"whisper_{m}.txt").exists()
+    ]
+
     # Collect all resolutions: list of (diff, chosen_text) pairs
     resolutions = {}  # diff index in all_diffs → chosen text
+    clusters_reused = 0
 
     for cluster_idx, cluster in enumerate(clusters):
+        checkpoint_path = ensemble_dir / f"cluster_{cluster_idx:03d}.json"
+
+        # Check for reusable checkpoint
+        if whisper_inputs and is_up_to_date(checkpoint_path, *whisper_inputs):
+            with open(checkpoint_path, 'r') as f:
+                saved = json.load(f)
+            # Restore resolutions from checkpoint
+            for i, choice in enumerate(saved["choices"]):
+                if i < len(cluster):
+                    diff = cluster[i]
+                    diff_key = id(diff)
+                    if choice == "A":
+                        chosen = diff["a_text"] if diff["a_text"] else "(omit)"
+                    elif choice == "B":
+                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                    else:
+                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                    resolutions[diff_key] = chosen
+            clusters_reused += 1
+            continue
+
         print(f"  Resolving cluster {cluster_idx + 1}/{len(clusters)} ({len(cluster)} diffs)...")
 
         # Build prompt for this cluster
-        # Note: diffs have a_text = other model, b_text = base model
-        # For anonymous presentation, randomly assign A/B labels
         cluster_prompt = _build_cluster_prompt(
             cluster, base_words,
             all_transcripts[other_models[0]].split() if other_models else [],
             context_words=config.merge_diff_context_words,
         )
 
-        prompt = f"""You are resolving disagreements between two Whisper transcriptions of the same speech.
-No model is more reliable than the other — judge each difference on its merits.
-{hallucination_warning}
-{cluster_prompt}
-
-For each numbered disagreement, reply with just the number and your choice: A or B.
-If both omitted, reply with the number and "A" to keep the omission.
-
-Example output:
-1. A
-2. B
-3. A
-
-Output your decisions:"""
-
-        message = llm_call_with_retry(
-            client, config,
-            model=config.claude_model,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+        cluster_choices, cluster_resolutions = _call_and_parse_cluster(
+            client, config, cluster, cluster_prompt, hallucination_warning,
         )
 
-        response = _clean_llm_output(message.content[0].text)
+        # If all diffs unresolved, retry without context (may help with content refusals)
+        if all(c is None for c in cluster_choices):
+            # Build disagreements-only prompt (strip context)
+            diff_lines = []
+            for i, d in enumerate(cluster, 1):
+                if d["type"] == "substitution":
+                    diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: "{d["b_text"]}"')
+                elif d["type"] == "deletion":
+                    diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: (omit)')
+                elif d["type"] == "insertion":
+                    diff_lines.append(f'{i}. A: (omit) | B: "{d["b_text"]}"')
+            minimal_prompt = "DISAGREEMENTS:\n" + "\n".join(diff_lines)
 
-        # Parse response: "1. A" or "1: B" or "1) A"
-        for line in response.splitlines():
-            line = line.strip()
-            m = re.match(r'^(\d+)[.):]\s*(.*)', line)
-            if m:
-                num = int(m.group(1))
-                choice = m.group(2).strip().upper()
-                # Clean any format leakage
-                choice = _clean_resolution(choice).upper()
-                if 1 <= num <= len(cluster):
-                    diff = cluster[num - 1]
-                    diff_key = id(diff)
-                    # Map A/B choice to the actual text
-                    if choice.startswith("A"):
-                        # A = text_a (other/small model)
-                        chosen = diff["a_text"] if diff["a_text"] else "(omit)"
-                    elif choice.startswith("B"):
-                        # B = text_b (base/medium model)
-                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
-                    else:
-                        # Unrecognized — fall back to base text
-                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
-                    resolutions[diff_key] = chosen
+            print(f"    Retrying cluster {cluster_idx + 1} without context...")
+            cluster_choices, cluster_resolutions = _call_and_parse_cluster(
+                client, config, cluster, minimal_prompt, hallucination_warning,
+            )
+
+        # Store resolutions
+        for diff_key, chosen in cluster_resolutions.items():
+            resolutions[diff_key] = chosen
+
+        # Save checkpoint
+        _save_json(checkpoint_path, {"choices": cluster_choices})
+
+    if clusters_reused:
+        print(f"  Reused {clusters_reused}/{len(clusters)} clusters from checkpoint")
 
     # Step 4: Apply resolutions to base text
     resolved_text = _apply_resolutions(base_words, all_diffs, resolutions)
@@ -588,6 +671,16 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
         whisper_inputs = [paths["txt"] for paths in data.whisper_transcripts.values()
                          if paths.get("txt")]
         action = f"adjudicate {len(models)} Whisper transcripts ({', '.join(models)})"
+        if config.dry_run:
+            # Show checkpoint status in dry-run
+            ensemble_dir = config.output_dir / "ensemble_chunks"
+            if ensemble_dir.exists():
+                checkpoints = list(ensemble_dir.glob("cluster_*.json"))
+                fresh = sum(1 for cp in checkpoints
+                            if whisper_inputs and is_up_to_date(cp, *whisper_inputs))
+                total = len(checkpoints)
+                if fresh > 0:
+                    action += f" ({fresh}/{total} clusters cached, {total - fresh} to resolve)"
         if _should_skip(config, merged_path, action, *whisper_inputs):
             if merged_path.exists():
                 data.transcript_path = merged_path
