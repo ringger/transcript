@@ -15,6 +15,7 @@ __pycache__/
 
 # Virtual environments
 venv/
+.venv/
 env/
 .env
 
@@ -36,6 +37,10 @@ transcripts/
 
 # Intermediate processing files
 *_clean.txt
+
+# Eval data and runs (large, not committed)
+eval-data/
+eval-runs/
 
 # Build artifacts
 dist/
