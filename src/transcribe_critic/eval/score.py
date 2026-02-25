@@ -208,7 +208,9 @@ def score_file(
     When hypothesis='all', scores every available transcript variant.
     Returns a list of FileResult (one per variant scored).
     """
-    output_dir = run_dir / entry.file_id
+    output_dir = run_dir / f"file{entry.file_id}"
+    if not output_dir.exists():
+        output_dir = run_dir / entry.file_id
 
     if not output_dir.exists():
         r = FileResult(file_id=entry.file_id, duration_secs=entry.duration_secs,

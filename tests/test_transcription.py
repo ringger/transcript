@@ -16,7 +16,9 @@ from transcribe_critic.transcription import (
     _cluster_diffs,
     _ensemble_whisper_transcripts,
     _filter_trivial_diffs,
+    _format_reading,
     _load_transcript_segments,
+    _merge_pairwise_diffs,
     _parse_wdiff_diffs,
     _run_whisper_model,
     _select_largest_model_json,
@@ -254,10 +256,8 @@ class TestBuildClusterPrompt:
             {"type": "substitution", "a_text": "cat", "b_text": "dog",
              "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
         ]
-        # base_words = medium (text_b), other_words = small (text_a)
         base_words = "The quick brown dog sat on the mat in the room".split()
-        other_words = "The quick brown cat sat on the mat in the room".split()
-        prompt = _build_cluster_prompt(cluster, base_words, other_words, context_words=3)
+        prompt = _build_cluster_prompt(cluster, base_words, context_words=3)
         assert "[1]" in prompt
         assert "cat" in prompt
         assert "dog" in prompt
@@ -269,10 +269,8 @@ class TestBuildClusterPrompt:
             {"type": "insertion", "a_text": "", "b_text": "extra",
              "a_pos": 3, "b_pos": 3, "a_len": 0, "b_len": 1},
         ]
-        # base_words = medium (has "extra"), other_words = small (no "extra")
         base_words = "one two three extra four five".split()
-        other_words = "one two three four five".split()
-        prompt = _build_cluster_prompt(cluster, base_words, other_words)
+        prompt = _build_cluster_prompt(cluster, base_words)
         assert "(omit)" in prompt
 
     def test_diverged_positions_uses_b_pos(self):
@@ -285,8 +283,7 @@ class TestBuildClusterPrompt:
         ]
         # medium (base): word at position 5 is "dog"
         base_words = "zero one two three four dog six seven eight nine".split()
-        other_words = "zero one two XX YY three four cat six seven eight nine".split()
-        prompt = _build_cluster_prompt(cluster, base_words, other_words, context_words=2)
+        prompt = _build_cluster_prompt(cluster, base_words, context_words=2)
         # Context should show words around b_pos=5 in medium: "...four [1] six seven..."
         assert "four" in prompt
         assert "six" in prompt
@@ -314,6 +311,152 @@ class TestBuildClusterPrompt:
         # Should be sorted by b_pos
         assert clusters[0][0]["b_pos"] == 5
         assert clusters[0][1]["b_pos"] == 10
+
+
+# ---------------------------------------------------------------------------
+# _merge_pairwise_diffs
+# ---------------------------------------------------------------------------
+
+class TestMergePairwiseDiffs:
+    def test_same_position_merged(self):
+        """Diffs at the same (b_pos, b_len) from different models are merged."""
+        pairwise = [
+            ("small", [
+                {"type": "substitution", "a_text": "cat", "b_text": "dog",
+                 "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1},
+            ]),
+            ("medium", [
+                {"type": "substitution", "a_text": "cat", "b_text": "dog",
+                 "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1},
+            ]),
+        ]
+        result = _merge_pairwise_diffs(pairwise, "large", ["small", "medium", "large"])
+        assert len(result) == 1
+        assert "readings" in result[0]
+        readings = result[0]["readings"]
+        assert readings["small"] == "cat"
+        assert readings["medium"] == "cat"
+        assert readings["large"] == "dog"  # base model gets b_text
+
+    def test_different_positions_separate(self):
+        """Diffs at different positions stay separate."""
+        pairwise = [
+            ("small", [
+                {"type": "substitution", "a_text": "cat", "b_text": "dog",
+                 "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1},
+            ]),
+            ("medium", [
+                {"type": "substitution", "a_text": "hat", "b_text": "mat",
+                 "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
+            ]),
+        ]
+        result = _merge_pairwise_diffs(pairwise, "large", ["small", "medium", "large"])
+        assert len(result) == 2
+
+    def test_model_not_in_diff_gets_base(self):
+        """A model with no diff at a position gets the base text."""
+        pairwise = [
+            ("small", [
+                {"type": "substitution", "a_text": "cat", "b_text": "dog",
+                 "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1},
+            ]),
+            ("medium", []),  # medium agrees with large at all positions
+        ]
+        result = _merge_pairwise_diffs(pairwise, "large", ["small", "medium", "large"])
+        assert len(result) == 1
+        readings = result[0]["readings"]
+        assert readings["small"] == "cat"
+        assert readings["medium"] == "dog"  # agreed with base
+        assert readings["large"] == "dog"   # base
+
+    def test_all_three_differ(self):
+        """All three models have different text at same position."""
+        pairwise = [
+            ("small", [
+                {"type": "substitution", "a_text": "spectral", "b_text": "special",
+                 "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1},
+            ]),
+            ("medium", [
+                {"type": "substitution", "a_text": "spectacular", "b_text": "special",
+                 "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1},
+            ]),
+        ]
+        result = _merge_pairwise_diffs(pairwise, "large", ["small", "medium", "large"])
+        assert len(result) == 1
+        readings = result[0]["readings"]
+        assert readings["small"] == "spectral"
+        assert readings["medium"] == "spectacular"
+        assert readings["large"] == "special"
+
+    def test_empty_diffs(self):
+        """All pairwise diffs empty returns empty list."""
+        pairwise = [("small", []), ("medium", [])]
+        result = _merge_pairwise_diffs(pairwise, "large", ["small", "medium", "large"])
+        assert result == []
+
+    def test_readings_order(self):
+        """Readings are ordered: non-base models first (in all_models order), base last."""
+        pairwise = [
+            ("small", [
+                {"type": "substitution", "a_text": "x", "b_text": "z",
+                 "a_pos": 0, "b_pos": 0, "a_len": 1, "b_len": 1},
+            ]),
+            ("medium", [
+                {"type": "substitution", "a_text": "y", "b_text": "z",
+                 "a_pos": 0, "b_pos": 0, "a_len": 1, "b_len": 1},
+            ]),
+        ]
+        result = _merge_pairwise_diffs(pairwise, "large", ["small", "medium", "large"])
+        keys = list(result[0]["readings"].keys())
+        assert keys == ["small", "medium", "large"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-way prompt and parsing
+# ---------------------------------------------------------------------------
+
+class TestMultiWayPrompt:
+    def test_multiway_shows_abc(self):
+        """Multi-way diffs show A/B/C labels."""
+        cluster = [
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1,
+             "readings": {"small": "cat", "medium": "dog", "large": "dog"}},
+        ]
+        base_words = "The quick dog sat here".split()
+        prompt = _build_cluster_prompt(cluster, base_words, context_words=2)
+        assert "A:" in prompt
+        assert "B:" in prompt
+        assert "C:" in prompt
+        assert '"cat"' in prompt
+        assert '"dog"' in prompt
+
+    def test_multiway_agreeing_models_both_shown(self):
+        """When two models agree, both still get their own letter with same text."""
+        cluster = [
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1,
+             "readings": {"small": "cat", "medium": "dog", "large": "dog"}},
+        ]
+        base_words = "The quick dog sat here".split()
+        prompt = _build_cluster_prompt(cluster, base_words, context_words=2)
+        # B and C should both show "dog"
+        lines = prompt.split("\n")
+        disagree_line = [l for l in lines if "1." in l][0]
+        assert disagree_line.count('"dog"') == 2
+
+    def test_multiway_no_model_names(self):
+        """Multi-way prompt should NOT contain model names."""
+        cluster = [
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 2, "b_pos": 2, "a_len": 1, "b_len": 1,
+             "readings": {"small": "cat", "medium": "dog", "large": "dog"}},
+        ]
+        base_words = "The quick dog sat here".split()
+        prompt = _build_cluster_prompt(cluster, base_words, context_words=2)
+        assert "small" not in prompt
+        assert "medium" not in prompt
+        assert "large" not in prompt
 
 
 class TestApplyResolutions:
@@ -598,13 +741,10 @@ class TestTranscribeAudio:
         assert data.transcript_path == txt
         mock_run.assert_called_once()
 
-    @patch("transcribe_critic.transcription._load_transcript_segments")
-    @patch("transcribe_critic.transcription._ensemble_whisper_transcripts")
     @patch("transcribe_critic.transcription._run_whisper_model")
     @patch("transcribe_critic.transcription.check_dependencies",
            return_value={"mlx_whisper": True, "whisper": False})
-    def test_multiple_models_calls_ensemble(self, mock_deps, mock_run, mock_ensemble,
-                                             mock_load, tmp_path):
+    def test_multiple_models_does_not_call_ensemble(self, mock_deps, mock_run, tmp_path):
         config = SpeechConfig(url="x", output_dir=tmp_path,
                               whisper_models=["small", "medium"])
         audio = tmp_path / "audio.mp3"
@@ -617,14 +757,10 @@ class TestTranscribeAudio:
             d.whisper_transcripts[model] = {"txt": txt, "json": None}
         mock_run.side_effect = populate_transcripts
 
-        def set_whisper_merged(cfg, d):
-            d.transcript_path = tmp_path / "whisper_merged.txt"
-            d.transcript_path.write_text("whisper_merged")
-        mock_ensemble.side_effect = set_whisper_merged
-
         transcribe_audio(config, data)
         assert mock_run.call_count == 2
-        mock_ensemble.assert_called_once()
+        # transcript_path not set — ensemble (run separately) will set it
+        assert data.transcript_path is None
 
     @patch("transcribe_critic.transcription._load_transcript_segments")
     @patch("transcribe_critic.transcription._run_whisper_model")

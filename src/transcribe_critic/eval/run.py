@@ -94,7 +94,7 @@ def run_pipeline(args):
 
     if args.dry_run:
         for entry in entries:
-            output_dir = run_dir / entry.file_id
+            output_dir = run_dir / f"file{entry.file_id}"
             complete = _is_complete(output_dir) and not args.force
             state = "skip (complete)" if complete else "would run"
             print(f"  {entry.file_id}: {state}")
@@ -109,7 +109,7 @@ def run_pipeline(args):
     skipped = 0
 
     for i, entry in enumerate(entries, 1):
-        output_dir = run_dir / entry.file_id
+        output_dir = run_dir / f"file{entry.file_id}"
         audio_path = dataset_dir / entry.audio_path
 
         # Skip if already complete

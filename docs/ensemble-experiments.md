@@ -13,16 +13,16 @@ Three files from Rev16 evaluated against reference transcripts using meeteval cp
 | 9    | 25.1%        | 24.8%          |
 | **Avg** | **30.3%**  | **27.2%**      |
 
-## Current Best Results (Sonnet + A/B format)
+## Current Best Results (Sonnet + A/B format + anti-hallucination flags)
 
 | File | small | medium | merged | Gap to medium |
 |------|-------|--------|--------|---------------|
-| 3 | 29.8% | 28.9% | **28.3%** | -0.6pp |
-| 4 | 36.0% | 27.9% | **27.6%** | -0.3pp |
-| 9 | 25.1% | 24.8% | **24.8%** | 0.0pp |
-| **Avg** | **30.3%** | **27.2%** | **26.9%** | **-0.3pp** |
+| 3 | 31.5% | 29.5% | **28.5%** | -1.0pp |
+| 4 | 31.3% | 29.2% | **28.2%** | -1.0pp |
+| 9 | 24.1% | 24.5% | **23.1%** | -1.4pp |
+| **Avg** | **28.9%** | **27.7%** | **26.6%** | **-1.1pp** |
 
-The ensemble beats medium on every file. Parse rates: 982/988, 1112/1122, 186/186.
+The ensemble beats medium by 1.1pp on average, consistent across all 3 files.
 
 ## Experiment History
 
@@ -89,6 +89,48 @@ Switched to Claude Sonnet 4 via API. Added ensemble checkpointing (`ensemble_chu
 
 **Key finding:** Model quality was the bottleneck. The diff resolution architecture and A/B format were necessary but not sufficient — a capable adjudicator model was also required.
 
+### 12. Whisper Large — Catastrophic Hallucination
+
+Added whisper large (via mlx-whisper) as a third model for 3-way adjudication with majority-vote signal. Extended the diff resolution code to merge pairwise diffs and present anonymous A/B/C choices.
+
+On file 3, whisper large produced 16,160 words — but 14,958 of those were the phrase "The unremarkable." repeated 7,479 times. After hallucination loop collapsing, only 1,198 words remained (vs ~24,000 from small/medium). The model effectively stopped transcribing after the first few minutes.
+
+| File | small | medium | large | 3-way merged | 2-way merged |
+|------|-------|--------|-------|--------------|--------------|
+| 3 | 29.8% | 28.9% | 97.0% | 29.0% | **28.3%** |
+
+Using large as base (the default, since it's the "largest" model) dragged the merged result to 29.0% — worse than medium alone. The 3-way code works correctly, but garbage-in-garbage-out: a catastrophically broken base model poisons the ensemble.
+
+**Conclusion:** mlx-whisper large is unreliable on long audio (2+ hours). Staying with 2-way (small + medium) until a more robust large model is available. The 3-way adjudication code remains in place for future use.
+
+### 13. Anti-Hallucination Flags
+
+Added Whisper anti-hallucination flags to address the large model failure from experiment 12. These are applied to all model sizes:
+
+- `--condition-on-previous-text False` — breaks the feedback loop where one hallucinated window cascades into all subsequent windows
+- `--no-speech-threshold 0.2` — raises the bar for detecting speech vs silence
+- `--compression-ratio-threshold 2.0` — flags repetitive/compressed output
+- `--hallucination-silence-threshold 3.0` — detects hallucination during silent segments (requires `--word-timestamps True`)
+
+Re-ran the full 3-file eval with small + medium (2-way ensemble, Sonnet adjudicator) using the new flags.
+
+| File | small | medium | merged | Gap to medium |
+|------|-------|--------|--------|---------------|
+| 3 | 31.5% | 29.5% | **28.5%** | -1.0pp |
+| 4 | 31.3% | 29.2% | **28.2%** | -1.0pp |
+| 9 | 24.1% | 24.5% | **23.1%** | -1.4pp |
+| **Avg** | **28.9%** | **27.7%** | **26.6%** | **-1.1pp** |
+
+Comparison with pre-antihalluc results (experiment 11):
+
+| Metric | Before (test1) | After (antihalluc) | Change |
+|--------|---------------|-------------------|--------|
+| Medium avg | 27.2% | 27.7% | +0.5pp |
+| Merged avg | 26.9% | 26.6% | -0.3pp |
+| Gap (merged vs medium) | -0.3pp | -1.1pp | -0.8pp |
+
+**Key finding:** The anti-hallucination flags slightly changed individual model WERs (some up, some down), but the ensemble's gap over medium widened dramatically from -0.3pp to -1.1pp. The merged result now consistently and substantially beats medium on every file. The flags appear to produce transcripts that differ in more meaningful ways, giving the adjudicator better signal.
+
 ## Key Lessons
 
 1. **Constrain the output format.** Text-echo lets the LLM invent words and leak formatting. A/B choice is strictly better.
@@ -98,7 +140,7 @@ Switched to Claude Sonnet 4 via API. Added ensemble checkpointing (`ensemble_chu
 
 ## Next Steps
 
-- Add a third Whisper model (e.g., large-v3) for majority-vote signal
+- Re-test whisper large with anti-hallucination flags for 3-way adjudication
 - Expand eval to more Rev16 files for statistical significance
 - Test with a local model closer to Sonnet quality (e.g., Llama 3.3 70B via Ollama)
 

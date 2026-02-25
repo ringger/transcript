@@ -831,8 +831,7 @@ Examples:
         if _should_run_step("transcribe", config):
             transcribe_audio(config, data)
 
-        # Ensemble can be re-run independently of transcription
-        if _should_run_step("ensemble", config) and not _should_run_step("transcribe", config):
+        if _should_run_step("ensemble", config):
             from transcribe_critic.transcription import _ensemble_whisper_transcripts
             _ensemble_whisper_transcripts(config, data)
 

@@ -152,6 +152,52 @@ def _filter_trivial_diffs(diffs: list[dict]) -> list[dict]:
     return filtered
 
 
+def _merge_pairwise_diffs(pairwise_diffs: list[tuple[str, list[dict]]],
+                          base_model: str,
+                          all_models: list[str]) -> list[dict]:
+    """Merge pairwise diffs into multi-way diffs with per-model readings.
+
+    Each pairwise entry is (model_name, diffs) where diffs are from wdiff
+    of that model against the base. Diffs at the same (b_pos, b_len) are
+    merged into a single diff with a ``readings`` dict mapping each model
+    name to its text at that position. Models not present in any pairwise
+    diff at a position implicitly agree with the base.
+
+    The ``readings`` dict is ordered: non-base models first (in all_models
+    order), then the base model last.
+    """
+    # Index pairwise diffs by (b_pos, b_len)
+    by_pos: dict[tuple[int, int], dict] = {}  # key → merged diff
+    readings_by_pos: dict[tuple[int, int], dict[str, str]] = {}
+
+    for model_name, diffs in pairwise_diffs:
+        for d in diffs:
+            key = (d["b_pos"], d["b_len"])
+            if key not in by_pos:
+                by_pos[key] = dict(d)  # copy first diff as template
+                readings_by_pos[key] = {}
+            readings_by_pos[key][model_name] = d["a_text"]
+
+    # Build final merged diffs with ordered readings
+    merged = []
+    non_base = [m for m in all_models if m != base_model]
+    for key in sorted(by_pos):
+        d = by_pos[key]
+        readings = {}
+        for m in non_base:
+            if m in readings_by_pos[key]:
+                readings[m] = readings_by_pos[key][m]
+            else:
+                # Model agreed with base at this position
+                readings[m] = d["b_text"]
+        # Base model last
+        readings[base_model] = d["b_text"]
+        d["readings"] = readings
+        merged.append(d)
+
+    return merged
+
+
 def _cluster_diffs(diffs: list[dict], base_word_count: int,
                    context_words: int = 30,
                    max_cluster_diffs: int = 50) -> list[list[dict]]:
@@ -192,9 +238,9 @@ def _clean_resolution(text: str) -> str:
     Strips patterns like 'Model A: "text"', 'Decision: text', surrounding quotes.
     """
     # Strip pipe + second model alternative first (e.g., '| Model B: "xyz"')
-    text = re.sub(r'\s*\|\s*(?:Model\s+[AB])\s*:.*$', '', text, flags=re.IGNORECASE)
-    # Strip "Model A:" / "Model B:" prefix (case-insensitive)
-    text = re.sub(r'^(?:Model\s+[AB])\s*:\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*\|\s*(?:Model\s+[A-Z])\s*:.*$', '', text, flags=re.IGNORECASE)
+    # Strip "Model A:" / "Model B:" / "Model C:" prefix (case-insensitive)
+    text = re.sub(r'^(?:Model\s+[A-Z])\s*:\s*', '', text, flags=re.IGNORECASE)
     # Strip "Current:" / "Alternative:" / "Decision:" / "Choice:" / "Reading:" prefix
     text = re.sub(r'^(?:Current|Alternative|Alternative adds|Decision|Choice|Reading)\s*:\s*', '', text, flags=re.IGNORECASE)
     # Strip surrounding quotes
@@ -204,14 +250,22 @@ def _clean_resolution(text: str) -> str:
     return text.strip()
 
 
+def _format_reading(text: str) -> str:
+    """Format a single reading for the prompt: quoted text or (omit)."""
+    return f'"{text}"' if text else "(omit)"
+
+
 def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
-                          other_words: list[str], context_words: int = 30) -> str:
+                          context_words: int = 30) -> str:
     """Build an LLM prompt for resolving a cluster of diffs.
 
     Shows context around the diffs with numbered disagreement markers.
-    Uses anonymous Model A / Model B labels.
+    Uses anonymous letter labels (A, B, C, ...).
+
+    If diffs have a ``readings`` dict (multi-way), each model gets a letter.
+    Otherwise falls back to 2-way A/B format.
     """
-    # Find the span this cluster covers in the base text (text_b = medium)
+    # Find the span this cluster covers in the base text
     first_pos = cluster[0]["b_pos"]
     last = cluster[-1]
     last_end = last["b_pos"] + last["b_len"]
@@ -225,18 +279,12 @@ def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
     disagreements = []
 
     for i, d in enumerate(cluster, 1):
-        # Add text before this diff (using b_pos = position in base/medium)
         if pos < d["b_pos"]:
             context_parts.append(" ".join(base_words[pos:d["b_pos"]]))
-
-        # Add diff marker
         context_parts.append(f"[{i}]")
         disagreements.append(d)
-
-        # Advance past the diff in base text (text_b)
         pos = d["b_pos"] + d["b_len"]
 
-    # Add trailing context
     if pos < ctx_end:
         context_parts.append(" ".join(base_words[pos:ctx_end]))
 
@@ -249,12 +297,21 @@ def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
     # Build disagreement list
     diff_lines = []
     for i, d in enumerate(disagreements, 1):
-        if d["type"] == "substitution":
-            diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: "{d["b_text"]}"')
-        elif d["type"] == "deletion":
-            diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: (omit)')
-        elif d["type"] == "insertion":
-            diff_lines.append(f'{i}. A: (omit) | B: "{d["b_text"]}"')
+        if "readings" in d:
+            # Multi-way format: one letter per model
+            parts = []
+            for j, (model, text) in enumerate(d["readings"].items()):
+                letter = chr(ord("A") + j)
+                parts.append(f'{letter}: {_format_reading(text)}')
+            diff_lines.append(f'{i}. {" | ".join(parts)}')
+        else:
+            # Legacy 2-way format
+            if d["type"] == "substitution":
+                diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: "{d["b_text"]}"')
+            elif d["type"] == "deletion":
+                diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: (omit)')
+            elif d["type"] == "insertion":
+                diff_lines.append(f'{i}. A: (omit) | B: "{d["b_text"]}"')
 
     return f"""CONTEXT:
 {context_line}
@@ -265,18 +322,32 @@ DISAGREEMENTS:
 
 def _call_and_parse_cluster(client, config, cluster, cluster_prompt,
                             hallucination_warning):
-    """Call the LLM to resolve a cluster and parse the A/B response.
+    """Call the LLM to resolve a cluster and parse the A/B/C response.
 
     Returns (cluster_choices, cluster_resolutions) where:
-      cluster_choices: list of "A", "B", or None for each diff (for checkpointing)
+      cluster_choices: list of "A", "B", "C", ... or None for each diff (for checkpointing)
       cluster_resolutions: dict of diff id(diff) → chosen text
     """
-    prompt = f"""You are resolving disagreements between two Whisper transcriptions of the same speech.
+    # Determine how many choices per diff
+    has_readings = any("readings" in d for d in cluster)
+    if has_readings:
+        # Count readings from first diff with readings
+        n_choices = max(len(d["readings"]) for d in cluster if "readings" in d)
+        letters = [chr(ord("A") + i) for i in range(n_choices)]
+        letter_list = ", ".join(letters[:-1]) + f", or {letters[-1]}"
+        model_desc = f"{n_choices} Whisper transcriptions"
+        agreement_hint = "\nWhen multiple options show the same text, that agreement is a useful signal.\n"
+    else:
+        letter_list = "A or B"
+        model_desc = "two Whisper transcriptions"
+        agreement_hint = ""
+
+    prompt = f"""You are resolving disagreements between {model_desc} of the same speech.
 No model is more reliable than the other — judge each difference on its merits.
-{hallucination_warning}
+{agreement_hint}{hallucination_warning}
 {cluster_prompt}
 
-For each numbered disagreement, reply with just the number and your choice: A or B.
+For each numbered disagreement, reply with just the number and your choice: {letter_list}.
 If both omitted, reply with the number and "A" to keep the omission.
 
 Example output:
@@ -311,15 +382,31 @@ Output your decisions:"""
             if 1 <= num <= len(cluster):
                 diff = cluster[num - 1]
                 diff_key = id(diff)
-                if choice.startswith("A"):
-                    chosen = diff["a_text"] if diff["a_text"] else "(omit)"
-                    cluster_choices[num - 1] = "A"
-                elif choice.startswith("B"):
-                    chosen = diff["b_text"] if diff["b_text"] else "(omit)"
-                    cluster_choices[num - 1] = "B"
+
+                if "readings" in diff:
+                    # Multi-way: map letter to reading
+                    readings_list = list(diff["readings"].values())
+                    models_list = list(diff["readings"].keys())
+                    letter_idx = ord(choice[0]) - ord("A") if choice and choice[0].isalpha() else -1
+                    if 0 <= letter_idx < len(readings_list):
+                        text = readings_list[letter_idx]
+                        chosen = text if text else "(omit)"
+                        cluster_choices[num - 1] = chr(ord("A") + letter_idx)
+                    else:
+                        # Fallback: base model (last in readings)
+                        chosen = readings_list[-1] if readings_list[-1] else "(omit)"
+                        cluster_choices[num - 1] = chr(ord("A") + len(readings_list) - 1)
                 else:
-                    chosen = diff["b_text"] if diff["b_text"] else "(omit)"
-                    cluster_choices[num - 1] = "B"
+                    # Legacy 2-way
+                    if choice.startswith("A"):
+                        chosen = diff["a_text"] if diff["a_text"] else "(omit)"
+                        cluster_choices[num - 1] = "A"
+                    elif choice.startswith("B"):
+                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                        cluster_choices[num - 1] = "B"
+                    else:
+                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                        cluster_choices[num - 1] = "B"
                 cluster_resolutions[diff_key] = chosen
 
     return cluster_choices, cluster_resolutions
@@ -363,19 +450,27 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
 
     other_models = [m for m in all_transcripts if m != base_model]
 
-    # For now, handle the 2-model case: one set of diffs
-    # (For 3+ models, we'd need to merge diff sets — future work)
-    all_diffs = []
+    # Collect pairwise diffs
+    pairwise_diffs = []
     for other_model in other_models:
         diffs = _parse_wdiff_diffs(
             all_transcripts[other_model],  # text_a = other
             all_transcripts[base_model],   # text_b = base
             config,
         )
-        # Filter trivial diffs
         diffs = _filter_trivial_diffs(diffs)
         print(f"  Found {len(diffs)} meaningful differences ({other_model} vs {base_model})")
-        all_diffs.extend(diffs)
+        pairwise_diffs.append((other_model, diffs))
+
+    # Merge into multi-way diffs if >1 other model
+    if len(other_models) > 1:
+        all_diffs = _merge_pairwise_diffs(
+            pairwise_diffs, base_model, list(all_transcripts.keys()),
+        )
+        pairwise_total = sum(len(d) for _, d in pairwise_diffs)
+        print(f"  Merged {pairwise_total} pairwise diffs into {len(all_diffs)} multi-way diffs")
+    else:
+        all_diffs = pairwise_diffs[0][1] if pairwise_diffs else []
 
     if not all_diffs:
         print("  No meaningful differences to resolve")
@@ -403,7 +498,7 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
     ensemble_dir = config.output_dir / "ensemble_chunks"
     ensemble_dir.mkdir(exist_ok=True)
     version_file = ensemble_dir / ".version"
-    ENSEMBLE_CHECKPOINT_VERSION = "2"  # bump to invalidate old checkpoints
+    ENSEMBLE_CHECKPOINT_VERSION = "v3"  # bump to invalidate old checkpoints
     if not version_file.exists() or version_file.read_text().strip() != ENSEMBLE_CHECKPOINT_VERSION:
         for old_file in ensemble_dir.glob("cluster_*.json"):
             old_file.unlink()
@@ -432,12 +527,23 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
                 if i < len(cluster):
                     diff = cluster[i]
                     diff_key = id(diff)
-                    if choice == "A":
-                        chosen = diff["a_text"] if diff["a_text"] else "(omit)"
-                    elif choice == "B":
-                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                    if "readings" in diff:
+                        # Multi-way: map letter to reading
+                        readings_list = list(diff["readings"].values())
+                        letter_idx = ord(choice[0]) - ord("A") if choice and choice[0].isalpha() else -1
+                        if 0 <= letter_idx < len(readings_list):
+                            text = readings_list[letter_idx]
+                            chosen = text if text else "(omit)"
+                        else:
+                            chosen = readings_list[-1] if readings_list[-1] else "(omit)"
                     else:
-                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                        # Legacy 2-way
+                        if choice == "A":
+                            chosen = diff["a_text"] if diff["a_text"] else "(omit)"
+                        elif choice == "B":
+                            chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                        else:
+                            chosen = diff["b_text"] if diff["b_text"] else "(omit)"
                     resolutions[diff_key] = chosen
             clusters_reused += 1
             continue
@@ -447,7 +553,6 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
         # Build prompt for this cluster
         cluster_prompt = _build_cluster_prompt(
             cluster, base_words,
-            all_transcripts[other_models[0]].split() if other_models else [],
             context_words=config.merge_diff_context_words,
         )
 
@@ -460,7 +565,13 @@ def _resolve_whisper_diffs(base_text: str, all_transcripts: dict,
             # Build disagreements-only prompt (strip context)
             diff_lines = []
             for i, d in enumerate(cluster, 1):
-                if d["type"] == "substitution":
+                if "readings" in d:
+                    parts = []
+                    for j, (model, text) in enumerate(d["readings"].items()):
+                        letter = chr(ord("A") + j)
+                        parts.append(f'{letter}: {_format_reading(text)}')
+                    diff_lines.append(f'{i}. {" | ".join(parts)}')
+                elif d["type"] == "substitution":
                     diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: "{d["b_text"]}"')
                 elif d["type"] == "deletion":
                     diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: (omit)')
@@ -556,24 +667,21 @@ def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
     for model in models:
         _run_whisper_model(config, data, model, deps)
 
-    # If multiple models, ensemble them
-    if len(models) > 1:
-        _ensemble_whisper_transcripts(config, data)
-    else:
-        # Single model - use it directly
+    # Single model - use it directly (ensemble handled by pipeline)
+    if len(models) == 1:
         model = models[0]
         if model in data.whisper_transcripts:
             data.transcript_path = data.whisper_transcripts[model]["txt"]
             data.transcript_json_path = data.whisper_transcripts[model].get("json")
 
-    if config.dry_run:
-        return
+        if config.dry_run:
+            return
 
-    if not data.transcript_path:
-        raise FileNotFoundError("Transcript file not found after transcription")
+        if not data.transcript_path:
+            raise FileNotFoundError("Transcript file not found after transcription")
 
-    # Load segments from JSON (use largest model's JSON for timestamps)
-    _load_transcript_segments(data)
+        # Load segments from JSON
+        _load_transcript_segments(data)
 
 
 def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps: dict) -> None:
@@ -598,9 +706,12 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
             cmd = ["mlx_whisper", str(data.audio_path),
                    "--model", model_name,
                    "--output-format", fmt,
-                   "--output-dir", str(config.output_dir)]
-            if config.diarize:
-                cmd.extend(["--word-timestamps", "True"])
+                   "--output-dir", str(config.output_dir),
+                   "--condition-on-previous-text", "False",
+                   "--no-speech-threshold", "0.2",
+                   "--compression-ratio-threshold", "2.0",
+                   "--hallucination-silence-threshold", "3.0",
+                   "--word-timestamps", "True"]
             run_command(cmd,
                 f"transcribing with mlx-whisper {model} ({fmt})",
                 config.verbose
@@ -631,7 +742,14 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
         print(f"  (Using openai-whisper - may be slow on CPU)")
         import whisper
         whisper_model = whisper.load_model(model)
-        result = whisper_model.transcribe(str(data.audio_path))
+        result = whisper_model.transcribe(
+            str(data.audio_path),
+            condition_on_previous_text=False,
+            no_speech_threshold=0.2,
+            compression_ratio_threshold=2.0,
+            hallucination_silence_threshold=3.0,
+            word_timestamps=True,
+        )
 
         with open(txt_path, 'w') as f:
             f.write(result["text"])
