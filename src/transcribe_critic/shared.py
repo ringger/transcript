@@ -41,7 +41,7 @@ class SpeechConfig:
     """Configuration for speech transcription pipeline."""
     url: str
     output_dir: Path
-    whisper_models: list = field(default_factory=lambda: ["small", "medium"])  # Can be multiple models
+    whisper_models: list = field(default_factory=lambda: ["small", "medium", "distil-large-v3"])  # Can be multiple models
     scene_threshold: float = 0.1
     analyze_slides: bool = False
     merge_sources: bool = True  # Merge YouTube captions with Whisper (default: on)

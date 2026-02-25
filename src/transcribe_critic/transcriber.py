@@ -28,8 +28,8 @@ Examples:
     # Full pipeline with slide analysis (merging is automatic)
     transcribe-critic "https://youtube.com/watch?v=..." --analyze-slides
 
-    # Ensemble multiple Whisper models for better accuracy
-    transcribe-critic "https://youtube.com/watch?v=..." --whisper-models small,medium
+    # Ensemble multiple Whisper models for better accuracy (default: small,medium,distil-large-v3)
+    transcribe-critic "https://youtube.com/watch?v=..." --whisper-models small,medium,distil-large-v3
 
     # Run without any LLM (Whisper only, free)
     transcribe-critic "https://youtube.com/watch?v=..." --no-llm
@@ -573,7 +573,7 @@ Examples:
   %(prog)s "https://youtube.com/watch?v=..."
   %(prog)s "https://youtube.com/watch?v=..." --analyze-slides
   %(prog)s "https://youtube.com/watch?v=..." --no-merge
-  %(prog)s "https://youtube.com/watch?v=..." --whisper-models small,medium
+  %(prog)s "https://youtube.com/watch?v=..." --whisper-models small,medium,distil-large-v3
   %(prog)s "https://youtube.com/watch?v=..." --no-slides --external-transcript URL
   %(prog)s "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
   %(prog)s --podcast "https://www.iheart.com/podcast/.../episode/..."
@@ -595,9 +595,9 @@ Examples:
 
     # Whisper
     whisper_group = parser.add_argument_group("whisper")
-    whisper_group.add_argument("--whisper-models", default="small,medium",
-                        help="Whisper model(s) to use, comma-separated (default: small,medium). "
-                             "Options: tiny, base, small, medium, large. "
+    whisper_group.add_argument("--whisper-models", default="small,medium,distil-large-v3",
+                        help="Whisper model(s) to use, comma-separated (default: small,medium,distil-large-v3). "
+                             "Options: tiny, base, small, medium, large, distil-large-v3. "
                              "Multiple models enables ensembling for better accuracy")
 
     # Slides
