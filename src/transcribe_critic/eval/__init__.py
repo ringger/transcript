@@ -57,12 +57,6 @@ def main():
         "--file-ids", type=str, default=None,
         help="Comma-separated file IDs to process",
     )
-    run_parser.add_argument(
-        "--pipeline-args",
-        type=str,
-        default="",
-        help="Additional args passed to transcribe-critic (quoted string)",
-    )
     run_parser.add_argument("--force", action="store_true", help="Re-run even if outputs exist")
     run_parser.add_argument("--dry-run", action="store_true", help="Show what would be run")
     run_parser.add_argument("-v", "--verbose", action="store_true")

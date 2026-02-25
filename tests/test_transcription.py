@@ -254,24 +254,66 @@ class TestBuildClusterPrompt:
             {"type": "substitution", "a_text": "cat", "b_text": "dog",
              "a_pos": 5, "b_pos": 5, "a_len": 1, "b_len": 1},
         ]
-        a_words = "The quick brown cat sat on the mat in the room".split()
-        b_words = "The quick brown dog sat on the mat in the room".split()
-        prompt = _build_cluster_prompt(cluster, a_words, b_words, context_words=3)
+        # base_words = medium (text_b), other_words = small (text_a)
+        base_words = "The quick brown dog sat on the mat in the room".split()
+        other_words = "The quick brown cat sat on the mat in the room".split()
+        prompt = _build_cluster_prompt(cluster, base_words, other_words, context_words=3)
         assert "[1]" in prompt
         assert "cat" in prompt
         assert "dog" in prompt
-        assert "Model A" in prompt
-        assert "Model B" in prompt
+        assert "A:" in prompt
+        assert "B:" in prompt
 
-    def test_insertion_shows_omitted(self):
+    def test_insertion_shows_omit(self):
         cluster = [
             {"type": "insertion", "a_text": "", "b_text": "extra",
              "a_pos": 3, "b_pos": 3, "a_len": 0, "b_len": 1},
         ]
-        a_words = "one two three four five".split()
-        b_words = "one two three extra four five".split()
-        prompt = _build_cluster_prompt(cluster, a_words, b_words)
-        assert "(omitted)" in prompt
+        # base_words = medium (has "extra"), other_words = small (no "extra")
+        base_words = "one two three extra four five".split()
+        other_words = "one two three four five".split()
+        prompt = _build_cluster_prompt(cluster, base_words, other_words)
+        assert "(omit)" in prompt
+
+    def test_diverged_positions_uses_b_pos(self):
+        """When a_pos and b_pos diverge, context should use b_pos (base/medium)."""
+        # Scenario: an earlier insertion shifted a_pos ahead of b_pos
+        # The diff is at b_pos=5 in medium but a_pos=7 in small
+        cluster = [
+            {"type": "substitution", "a_text": "cat", "b_text": "dog",
+             "a_pos": 7, "b_pos": 5, "a_len": 1, "b_len": 1},
+        ]
+        # medium (base): word at position 5 is "dog"
+        base_words = "zero one two three four dog six seven eight nine".split()
+        other_words = "zero one two XX YY three four cat six seven eight nine".split()
+        prompt = _build_cluster_prompt(cluster, base_words, other_words, context_words=2)
+        # Context should show words around b_pos=5 in medium: "...four [1] six seven..."
+        assert "four" in prompt
+        assert "six" in prompt
+        # Should NOT show words from a_pos=7 position: "seven" before the marker
+        # "seven" can appear after, but "eight" should not be the leading context
+        lines = prompt.split("\n")
+        context_line = [l for l in lines if "[1]" in l][0]
+        # "four" should precede the marker, "six" should follow
+        marker_idx = context_line.index("[1]")
+        before_marker = context_line[:marker_idx]
+        assert "four" in before_marker
+
+    def test_cluster_sorts_by_b_pos(self):
+        """_cluster_diffs should group by b_pos, not a_pos."""
+        # Two diffs close in b_pos but far in a_pos
+        diffs = [
+            {"type": "substitution", "a_text": "x", "b_text": "y",
+             "a_pos": 100, "b_pos": 5, "a_len": 1, "b_len": 1},
+            {"type": "substitution", "a_text": "p", "b_text": "q",
+             "a_pos": 5, "b_pos": 10, "a_len": 1, "b_len": 1},
+        ]
+        clusters = _cluster_diffs(diffs, base_word_count=200, context_words=10)
+        # Should be in one cluster (b_pos 5 and 10 are within context_words=10)
+        assert len(clusters) == 1
+        # Should be sorted by b_pos
+        assert clusters[0][0]["b_pos"] == 5
+        assert clusters[0][1]["b_pos"] == 10
 
 
 class TestApplyResolutions:

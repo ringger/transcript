@@ -95,7 +95,7 @@ def _hydrate_data(config: SpeechConfig, data: SpeechData) -> None:
     # Whisper model transcripts
     for txt in sorted(d.glob("whisper_*.txt")):
         name = txt.stem  # e.g. "whisper_medium"
-        if name == "whisper_merged":
+        if "merged" in name:
             continue
         model = name.removeprefix("whisper_")
         json_path = d / f"whisper_{model}.json"

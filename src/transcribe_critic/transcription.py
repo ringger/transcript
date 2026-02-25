@@ -163,16 +163,16 @@ def _cluster_diffs(diffs: list[dict], base_word_count: int,
     if not diffs:
         return []
 
-    # Sort by position in base text (text_a)
-    sorted_diffs = sorted(diffs, key=lambda d: d["a_pos"])
+    # Sort by position in base text (text_b = medium)
+    sorted_diffs = sorted(diffs, key=lambda d: d["b_pos"])
 
     clusters = []
     current = [sorted_diffs[0]]
 
     for d in sorted_diffs[1:]:
         prev = current[-1]
-        prev_end = prev["a_pos"] + prev["a_len"]
-        gap = d["a_pos"] - prev_end
+        prev_end = prev["b_pos"] + prev["b_len"]
+        gap = d["b_pos"] - prev_end
 
         if gap <= context_words and len(current) < max_cluster_diffs:
             current.append(d)
@@ -211,10 +211,10 @@ def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
     Shows context around the diffs with numbered disagreement markers.
     Uses anonymous Model A / Model B labels.
     """
-    # Find the span this cluster covers in the base text
-    first_pos = cluster[0]["a_pos"]
+    # Find the span this cluster covers in the base text (text_b = medium)
+    first_pos = cluster[0]["b_pos"]
     last = cluster[-1]
-    last_end = last["a_pos"] + last["a_len"]
+    last_end = last["b_pos"] + last["b_len"]
 
     ctx_start = max(0, first_pos - context_words)
     ctx_end = min(len(base_words), last_end + context_words)
@@ -225,16 +225,16 @@ def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
     disagreements = []
 
     for i, d in enumerate(cluster, 1):
-        # Add text before this diff
-        if pos < d["a_pos"]:
-            context_parts.append(" ".join(base_words[pos:d["a_pos"]]))
+        # Add text before this diff (using b_pos = position in base/medium)
+        if pos < d["b_pos"]:
+            context_parts.append(" ".join(base_words[pos:d["b_pos"]]))
 
         # Add diff marker
         context_parts.append(f"[{i}]")
         disagreements.append(d)
 
-        # Advance past the diff in text_a
-        pos = d["a_pos"] + d["a_len"]
+        # Advance past the diff in base text (text_b)
+        pos = d["b_pos"] + d["b_len"]
 
     # Add trailing context
     if pos < ctx_end:
@@ -250,11 +250,11 @@ def _build_cluster_prompt(cluster: list[dict], base_words: list[str],
     diff_lines = []
     for i, d in enumerate(disagreements, 1):
         if d["type"] == "substitution":
-            diff_lines.append(f'{i}. Model A: "{d["a_text"]}" | Model B: "{d["b_text"]}"')
+            diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: "{d["b_text"]}"')
         elif d["type"] == "deletion":
-            diff_lines.append(f'{i}. Model A: "{d["a_text"]}" | Model B: (omitted)')
+            diff_lines.append(f'{i}. A: "{d["a_text"]}" | B: (omit)')
         elif d["type"] == "insertion":
-            diff_lines.append(f'{i}. Model A: (omitted) | Model B: "{d["b_text"]}"')
+            diff_lines.append(f'{i}. A: (omit) | B: "{d["b_text"]}"')
 
     return f"""CONTEXT:
 {context_line}
@@ -357,9 +357,13 @@ No model is more reliable than the other — judge each difference on its merits
 {hallucination_warning}
 {cluster_prompt}
 
-For each numbered disagreement, output ONLY your chosen reading on a separate line.
-If a model omitted words, output "(omit)" to leave them out, or the words to include them.
-Format: one line per decision, starting with the number.
+For each numbered disagreement, reply with just the number and your choice: A or B.
+If both omitted, reply with the number and "A" to keep the omission.
+
+Example output:
+1. A
+2. B
+3. A
 
 Output your decisions:"""
 
@@ -372,18 +376,28 @@ Output your decisions:"""
 
         response = _clean_llm_output(message.content[0].text)
 
-        # Parse response: "1. chosen text" or "1: chosen text"
+        # Parse response: "1. A" or "1: B" or "1) A"
         for line in response.splitlines():
             line = line.strip()
             m = re.match(r'^(\d+)[.):]\s*(.*)', line)
             if m:
                 num = int(m.group(1))
-                chosen = m.group(2).strip()
-                # Strip LLM format leakage: "Model A: ...", quotes, "Decision: ..."
-                chosen = _clean_resolution(chosen)
+                choice = m.group(2).strip().upper()
+                # Clean any format leakage
+                choice = _clean_resolution(choice).upper()
                 if 1 <= num <= len(cluster):
                     diff = cluster[num - 1]
                     diff_key = id(diff)
+                    # Map A/B choice to the actual text
+                    if choice.startswith("A"):
+                        # A = text_a (other/small model)
+                        chosen = diff["a_text"] if diff["a_text"] else "(omit)"
+                    elif choice.startswith("B"):
+                        # B = text_b (base/medium model)
+                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
+                    else:
+                        # Unrecognized — fall back to base text
+                        chosen = diff["b_text"] if diff["b_text"] else "(omit)"
                     resolutions[diff_key] = chosen
 
     # Step 4: Apply resolutions to base text
@@ -566,20 +580,20 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
 
 def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> None:
     """Adjudicate multiple Whisper transcripts using wdiff."""
+    models = list(data.whisper_transcripts.keys())
     # Check for existing whisper_merged file
     if data.audio_path:
         merged_path = config.output_dir / WHISPER_MERGED_TXT
         # Inputs are the individual whisper transcripts
         whisper_inputs = [paths["txt"] for paths in data.whisper_transcripts.values()
                          if paths.get("txt")]
-        if _should_skip(config, merged_path, "adjudicate Whisper transcripts", *whisper_inputs):
+        action = f"adjudicate {len(models)} Whisper transcripts ({', '.join(models)})"
+        if _should_skip(config, merged_path, action, *whisper_inputs):
             if merged_path.exists():
                 data.transcript_path = merged_path
                 data.transcript_json_path = _select_largest_model_json(data)
             return
-    print(f"  Adjudicating {len(data.whisper_transcripts)} Whisper transcripts...")
-
-    models = list(data.whisper_transcripts.keys())
+    print(f"  Adjudicating {len(models)} Whisper transcripts: {', '.join(models)}")
     if len(models) < 2:
         return
 

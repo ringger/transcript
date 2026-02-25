@@ -591,6 +591,18 @@ class TestHydrateData:
         _hydrate_data(config, data)
         assert "merged" not in data.whisper_transcripts
 
+    def test_ignores_whisper_merged_variants(self, tmp_path):
+        """Backup files like whisper_merged_7b.txt should not be treated as model transcripts."""
+        (tmp_path / "whisper_small.txt").write_text("small text")
+        (tmp_path / "whisper_medium.txt").write_text("medium text")
+        (tmp_path / "whisper_merged.txt").write_text("merged text")
+        (tmp_path / "whisper_merged_7b.txt").write_text("old merged")
+        (tmp_path / "whisper_merged_14b_buggy.txt").write_text("bad merged")
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        _hydrate_data(config, data)
+        assert sorted(data.whisper_transcripts.keys()) == ["medium", "small"]
+
     def test_finds_whisper_merged_as_transcript(self, tmp_path):
         (tmp_path / "whisper_merged.txt").write_text("merged text")
         (tmp_path / "whisper_small.txt").write_text("small text")

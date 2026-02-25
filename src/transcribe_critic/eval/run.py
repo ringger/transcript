@@ -2,7 +2,6 @@
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -79,14 +78,9 @@ def run_pipeline(args):
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parse extra pipeline args
-    extra_args = shlex.split(args.pipeline_args) if args.pipeline_args else []
-
     total_hours = sum(e.duration_secs for e in entries) / 3600
     print(f"Processing {len(entries)} files ({total_hours:.1f} hours)")
     print(f"Output: {run_dir}")
-    if extra_args:
-        print(f"Pipeline args: {' '.join(extra_args)}")
     print()
 
     # Track status
@@ -106,7 +100,7 @@ def run_pipeline(args):
             print(f"  {entry.file_id}: {state}")
             if not complete:
                 cmd = ["transcribe-critic", dummy_url, "--podcast", "--no-slides",
-                       "-o", str(output_dir)] + extra_args
+                       "-o", str(output_dir)]
                 print(f"    {' '.join(cmd)}")
         return
 
@@ -136,7 +130,7 @@ def run_pipeline(args):
             "--podcast",
             "--no-slides",
             "-o", str(output_dir),
-        ] + extra_args
+        ]
 
         print(f"  [{i}/{len(entries)}] {entry.file_id} ({_fmt_duration(entry.duration_secs)})...")
         if args.verbose:
