@@ -274,7 +274,7 @@ def estimate_api_cost(config: SpeechConfig, num_slides: int = 45, transcript_wor
         ensemble_cost = input_cost + output_cost
         costs["ensemble_whisper"] = ensemble_cost
         costs["details"].append(
-            f"Whisper ensemble: {num_models} models × {num_chunks} chunks = ${ensemble_cost:.2f}")
+            f"Whisper ensemble: {num_models} models × {num_chunks} clusters = ${ensemble_cost:.2f}")
 
     costs["total"] = costs["analyze_slides"] + costs["merge_sources"] + costs["ensemble_whisper"]
 
@@ -619,8 +619,8 @@ Examples:
                         help="Anthropic API key (or set ANTHROPIC_API_KEY env var; implies --api)")
     llm_group.add_argument("--claude-model", default="claude-sonnet-4-20250514",
                         help="Claude model for API calls (default: claude-sonnet-4-20250514)")
-    llm_group.add_argument("--local-model", default="qwen2.5",
-                        help="Ollama model for text tasks (default: qwen2.5)")
+    llm_group.add_argument("--local-model", default="qwen2.5:14b",
+                        help="Ollama model for text tasks (default: qwen2.5:14b)")
     llm_group.add_argument("--ollama-url", default="http://localhost:11434/v1/",
                         help="Ollama server URL (default: http://localhost:11434/v1/)")
     llm_group.add_argument("--no-llm", action="store_true",

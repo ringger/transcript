@@ -67,7 +67,7 @@ class SpeechConfig:
     api_timeout: float = 120.0  # seconds per API attempt
     # Local LLM (default) vs cloud API
     local: bool = True  # Use local Ollama by default
-    local_model: str = "qwen2.5"  # Default Ollama model for text
+    local_model: str = "qwen2.5:14b"  # Default Ollama model for text
     local_vision_model: str = "llava"  # Default Ollama model for vision
     ollama_base_url: str = "http://localhost:11434/v1/"
 

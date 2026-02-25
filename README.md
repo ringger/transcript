@@ -43,7 +43,7 @@ brew install ollama          # macOS
 # curl -fsSL https://ollama.com/install.sh | sh  # Linux
 
 # Pull a model (one-time)
-ollama pull qwen2.5
+ollama pull qwen2.5:14b
 ```
 
 ### From Source
@@ -137,6 +137,9 @@ transcribe-critic "https://youtube.com/watch?v=..." --scene-threshold 0.15
 # Force re-processing (ignore existing files)
 transcribe-critic "https://youtube.com/watch?v=..." --force
 
+# Re-run only the Whisper ensemble step (uses existing Whisper outputs)
+transcribe-critic "https://youtube.com/watch?v=..." --steps ensemble -o ./my_transcript
+
 # Re-run only the merge step (uses existing Whisper outputs)
 transcribe-critic "https://youtube.com/watch?v=..." --steps merge -o ./my_transcript
 
@@ -187,14 +190,15 @@ Optional stages are skipped based on flags. Stage numbers are fixed regardless o
 |-------|-----------|------|----------|
 | [1] Download media | `download` | yt-dlp | No |
 | [2] Transcribe audio | `transcribe` | mlx-whisper | No |
-| [2b] Speaker diarization | `diarize` | pyannote.audio | Yes (`--diarize`) |
+| [2b] Whisper ensemble | `ensemble` | LLM + wdiff | Yes (on by default with 2+ models) |
+| [2c] Speaker diarization | `diarize` | pyannote.audio | Yes (`--diarize`) |
 | [3] Extract slides | `slides` | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
 | [4] Analyze slides with vision | `slides` | LLM + vision | Yes (`--analyze-slides`) |
 | [4b] Merge transcript sources | `merge` | LLM + wdiff | Yes (on by default; `--no-merge` to skip) |
 | [5] Generate markdown | `markdown` | Python | No |
 | [6] Source survival analysis | `analysis` | wdiff | No |
 
-Use `--steps <step1>,<step2>,...` to run only specific stages. Existing outputs from skipped stages are loaded automatically. This is useful for re-running just the merge after fixing a bug, without re-downloading or re-transcribing.
+Use `--steps <step1>,<step2>,...` to run only specific stages. Existing outputs from skipped stages are loaded automatically. This is useful for re-running just the ensemble or merge after fixing a bug, without re-downloading or re-transcribing.
 
 ## How It Works
 
@@ -246,10 +250,12 @@ Each source alone gets some things right and others wrong. Whisper hallucinates 
 When using multiple Whisper models (default: `small,medium`):
 
 1. Runs each model independently
-2. Uses `wdiff` to identify differences (normalized: no caps, no punctuation)
-3. An LLM adjudicates disagreements, preferring real words over transcription errors and proper nouns over generic alternatives
+2. Uses `wdiff` to identify specific word-level differences (normalized: no caps, no punctuation)
+3. Clusters nearby differences and presents each cluster to an LLM with anonymous labels ("A" / "B") and surrounding context
+4. The LLM picks A or B for each disagreement — constrained to choose between actual transcriptions, preventing hallucinated text
+5. Chosen readings are surgically applied to the base transcript, leaving uncontested regions untouched
 
-This is the same witness-and-adjudicate process as the multi-source critical text merge — multiple Whisper models are simply additional witnesses alongside captions and external transcripts. The implementation runs Whisper-vs-Whisper adjudication first to produce a single merged Whisper witness (`whisper_merged.txt`), which then enters the multi-source merge alongside captions and external transcripts.
+This targeted diff resolution avoids the problems of full-text rewriting (chunk-boundary duplication, errors in uncontested regions, wasted tokens). The implementation runs Whisper-vs-Whisper adjudication first to produce a single merged Whisper witness (`whisper_merged.txt`), which then enters the multi-source merge alongside captions and external transcripts.
 
 ### Speaker Diarization
 
@@ -279,7 +285,7 @@ Every stage checks `is_up_to_date(output, *inputs)` — if the output file is ne
 ESTIMATED API COSTS
 ==================================================
   Source merging: 3 sources × 59 chunks = $1.03
-  Whisper ensemble: 2 models × 59 chunks = $0.92
+  Whisper ensemble: 2 models × 98 clusters = $0.72
 
   TOTAL: $1.95 (estimate)
 ==================================================
