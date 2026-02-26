@@ -943,6 +943,7 @@ def _ensemble_whisper_transcripts(config: SpeechConfig, data: SpeechData) -> Non
     print(f"  Whisper-merged transcript saved: {merged_path.name}")
 
     data.transcript_json_path = _select_largest_model_json(data)
+    _load_transcript_segments(data)
 
 
 def _clean_llm_output(text: str) -> str:

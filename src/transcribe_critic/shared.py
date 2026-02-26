@@ -71,6 +71,7 @@ class SpeechConfig:
     claude_model: str = DEFAULT_CLAUDE_MODEL  # Anthropic API model; ignored when local=True (uses local_model)
     skip_existing: bool = True
     no_slides: bool = False  # Skip slide extraction entirely
+    title: Optional[str] = None  # Override the title (default: from yt-dlp metadata)
     podcast: bool = False  # Podcast mode: audio-only, skip video + captions
     external_transcript: Optional[str] = None  # External transcript file path or URL to include in merge
     diarize: bool = False  # Enable speaker diarization via pyannote

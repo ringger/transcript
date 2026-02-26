@@ -129,6 +129,11 @@ def _hydrate_data(config: SpeechConfig, data: SpeechData) -> None:
                 data.transcript_json_path = data.whisper_transcripts[size].get("json")
                 break
 
+    # Load transcript segments from JSON (needed by diarize step)
+    if data.transcript_json_path:
+        from transcribe_critic.transcription import _load_transcript_segments
+        _load_transcript_segments(data)
+
     # Diarization
     diar_txt = d / DIARIZED_TXT
     if diar_txt.exists():
@@ -610,6 +615,8 @@ Examples:
     slides_group = parser.add_argument_group("slides")
     slides_group.add_argument("--no-slides", action="store_true",
                         help="Skip slide extraction entirely (audio/transcript only)")
+    input_group.add_argument("--title",
+                        help="Override the title (default: from yt-dlp metadata)")
     input_group.add_argument("--podcast", action="store_true",
                         help="Podcast mode: audio-only, skip video and captions download (implies --no-slides)")
     slides_group.add_argument("--scene-threshold", type=float, default=0.1,
@@ -730,6 +737,7 @@ Examples:
         output_dir=output_dir,
         whisper_models=whisper_models,
         scene_threshold=args.scene_threshold,
+        title=args.title,
         no_slides=no_slides,
         podcast=args.podcast,
         analyze_slides=args.analyze_slides,

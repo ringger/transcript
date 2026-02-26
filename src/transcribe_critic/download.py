@@ -39,7 +39,7 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
             config.verbose
         )
         info = json.loads(result.stdout)
-    data.title = info.get("title", "speech")
+    data.title = config.title or info.get("title", "speech")
 
     print(f"  Title: {data.title}")
 
