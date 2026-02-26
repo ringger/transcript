@@ -13,7 +13,8 @@ import subprocess
 
 from transcribe_critic.shared import (
     tprint as print,
-    SpeechConfig, create_llm_client, llm_call_with_retry, is_up_to_date, _save_json,
+    SpeechConfig, COMMON_WORDS,
+    create_llm_client, llm_call_with_retry, is_up_to_date, _save_json,
 )
 
 
@@ -182,21 +183,21 @@ def _analyze_differences_wdiff(text_a: str, text_b: str, config: SpeechConfig,
 
 def _filter_meaningful_diffs(differences: list) -> list:
     """Filter wdiff differences to only meaningful ones (skip common words)."""
-    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'is', 'it'}
     meaningful_diffs = []
     for d in differences:
         if d["type"] == "changed":
             a_words = set(d["a_text"].lower().split())
             b_words = set(d["b_text"].lower().split())
-            if not (a_words <= common_words and b_words <= common_words):
+            if not (a_words <= COMMON_WORDS and b_words <= COMMON_WORDS):
                 meaningful_diffs.append(d)
         else:
             text = d.get("text", "").lower()
-            if text and text not in common_words:
+            if text and text not in COMMON_WORDS:
                 meaningful_diffs.append(d)
     return meaningful_diffs
 
 
+# Matches wdiff markup: [-deleted-], {+inserted+}, or common (unmarked) text.
 _WDIFF_TOKEN_PATTERN = re.compile(
     r'\[-(?P<deleted>.*?)-\]'
     r'|\{\+(?P<inserted>.*?)\+\}'

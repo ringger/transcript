@@ -35,19 +35,40 @@ print = tprint
 # Whisper model sizes in descending quality order (used for base-model selection)
 MODEL_SIZES = ["large", "distil-large-v3", "medium", "small", "base", "tiny"]
 
+# Map model short names to mlx-community HuggingFace model IDs
+MLX_MODEL_MAP = {
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+}
+
+# Default LLM model names
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_LOCAL_MODEL = "qwen2.5:14b"
+DEFAULT_LOCAL_VISION_MODEL = "llava"
+DEFAULT_OLLAMA_URL = "http://localhost:11434/v1/"
+DEFAULT_WHISPER_MODELS = ["small", "medium", "distil-large-v3"]
+
+# Common/stop words for filtering trivial diffs in ensembling and merging
+COMMON_WORDS = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at',
+                'to', 'for', 'of', 'is', 'it', 'i', 'we', 'he', 'she',
+                'they', 'you', 'my', 'your', 'his', 'her', 'its', 'our',
+                'their', 'this', 'that', 'was', 'were', 'be', 'been',
+                'has', 'have', 'had', 'do', 'does', 'did', 'will',
+                'would', 'could', 'should', 'may', 'might', 'not', 'no',
+                'so', 'if', 'then', 'than', 'just', 'also', 'very'}
+
 
 @dataclass
 class SpeechConfig:
     """Configuration for speech transcription pipeline."""
     url: str
     output_dir: Path
-    whisper_models: list = field(default_factory=lambda: ["small", "medium", "distil-large-v3"])  # Can be multiple models
+    whisper_models: list = field(default_factory=lambda: list(DEFAULT_WHISPER_MODELS))  # Can be multiple models
     scene_threshold: float = 0.1
     analyze_slides: bool = False
     merge_sources: bool = True  # Merge YouTube captions with Whisper (default: on)
     no_llm: bool = False  # Skip all LLM-dependent features (merging, ensembling, slide analysis)
     api_key: Optional[str] = None
-    claude_model: str = "claude-sonnet-4-20250514"  # Anthropic API model; ignored when local=True (uses local_model)
+    claude_model: str = DEFAULT_CLAUDE_MODEL  # Anthropic API model; ignored when local=True (uses local_model)
     skip_existing: bool = True
     no_slides: bool = False  # Skip slide extraction entirely
     podcast: bool = False  # Podcast mode: audio-only, skip video + captions
@@ -67,9 +88,9 @@ class SpeechConfig:
     api_timeout: float = 120.0  # seconds per API attempt
     # Local LLM (default) vs cloud API
     local: bool = True  # Use local Ollama by default
-    local_model: str = "qwen2.5:14b"  # Default Ollama model for text
-    local_vision_model: str = "llava"  # Default Ollama model for vision
-    ollama_base_url: str = "http://localhost:11434/v1/"
+    local_model: str = DEFAULT_LOCAL_MODEL  # Default Ollama model for text
+    local_vision_model: str = DEFAULT_LOCAL_VISION_MODEL  # Default Ollama model for vision
+    ollama_base_url: str = DEFAULT_OLLAMA_URL
 
 
 # Standard output filenames — single source of truth
@@ -107,6 +128,11 @@ class SpeechData:
     transcript_segments: list = field(default_factory=list)  # Segments with timestamps
     diarization_path: Optional[Path] = None  # Diarized structured transcript
     metadata: dict = field(default_factory=dict)  # Source metadata (title, description, channel, etc.)
+
+
+def _is_url(s: str) -> bool:
+    """Check if a string looks like an HTTP(S) URL."""
+    return s.startswith(("http://", "https://"))
 
 
 def is_up_to_date(output: Path, *inputs: Path) -> bool:
@@ -320,7 +346,7 @@ def _collect_source_paths(config: SpeechConfig, data: SpeechData,
         paths.append(data.transcript_path)
     if data.captions_path and data.captions_path.exists():
         paths.append(data.captions_path)
-    if config.external_transcript and not config.external_transcript.startswith(("http://", "https://")):
+    if config.external_transcript and not _is_url(config.external_transcript):
         ext_path = Path(config.external_transcript)
         if ext_path.exists():
             paths.append(ext_path)

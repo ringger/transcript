@@ -13,14 +13,14 @@ from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData,
     AUDIO_MP3, METADATA_JSON, CAPTIONS_VTT,
-    run_command, _save_json, _print_reusing, _dry_run_skip,
+    run_command, _save_json, _print_reusing, _dry_run_skip, _should_skip,
 )
 
 
 def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) -> None:
     """Download audio, video, and captions using yt-dlp."""
     print()
-    print("[1] Downloading media...")
+    print("[download] Downloading media...")
 
     output_template = str(config.output_dir / "%(title)s.%(ext)s")
 
@@ -67,9 +67,9 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
 
     # Download audio
     audio_path = config.output_dir / AUDIO_MP3
-    if config.skip_existing and audio_path.exists():
-        _print_reusing(audio_path.name)
-    elif not _dry_run_skip(config, "download audio", AUDIO_MP3):
+    if _should_skip(config, audio_path, "download audio"):
+        pass
+    else:
         print("  Downloading audio...")
         run_command(
             ["yt-dlp", "-x", "--audio-format", "mp3",
@@ -85,9 +85,9 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
               else "  Skipping video download (--no-slides)")
     else:
         video_path = config.output_dir / "video.mp4"
-        if config.skip_existing and video_path.exists():
-            _print_reusing(video_path.name)
-        elif not _dry_run_skip(config, "download video", "video.mp4"):
+        if _should_skip(config, video_path, "download video"):
+            pass
+        else:
             print("  Downloading video...")
             run_command(
                 ["yt-dlp", "-f", "mp4",
@@ -101,9 +101,9 @@ def download_media(config: SpeechConfig, data: SpeechData, info: dict = None) ->
     captions_path = config.output_dir / CAPTIONS_VTT
     if config.podcast:
         print("  Skipping captions download (--podcast)")
-    elif config.skip_existing and captions_path.exists():
-        _print_reusing(captions_path.name)
-    elif not _dry_run_skip(config, "download captions", CAPTIONS_VTT):
+    elif _should_skip(config, captions_path, "download captions"):
+        pass
+    else:
         print("  Downloading captions (if available)...")
         try:
             run_command(

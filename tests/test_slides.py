@@ -2,6 +2,7 @@
 
 import json
 import time
+from unittest.mock import MagicMock, patch
 
 from transcribe_critic.shared import SpeechConfig, SpeechData
 
@@ -222,3 +223,144 @@ class TestCreateBasicSlidesJson:
         create_basic_slides_json(config, data)
         assert data.slides_json_path == tmp_path / "slides_basic.json"
         assert len(data.slide_metadata) == 2
+
+
+# ---------------------------------------------------------------------------
+# extract_slides — ffmpeg execution path
+# ---------------------------------------------------------------------------
+
+class TestExtractSlidesExecution:
+    @patch("transcribe_critic.slides.subprocess.run")
+    def test_runs_ffmpeg_and_parses_timestamps(self, mock_run, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        video = tmp_path / "video.mp4"
+        video.write_text("fake video")
+        data = SpeechData(video_path=video)
+
+        # Simulate ffmpeg creating slide files + stderr with timestamps
+        slides_dir = tmp_path / "slides"
+        slides_dir.mkdir(exist_ok=True)
+        (slides_dir / "slide_0001.png").write_bytes(b"img1")
+        (slides_dir / "slide_0002.png").write_bytes(b"img2")
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr=(
+                "[Parsed_showinfo_1 @ 0x1234] n:   0 pts:      0 pts_time:5.5\n"
+                "[Parsed_showinfo_1 @ 0x1234] n:   1 pts:  90000 pts_time:30.2\n"
+            ),
+        )
+
+        extract_slides(config, data)
+        assert len(data.slide_images) == 2
+        assert len(data.slide_timestamps) == 2
+        assert data.slide_timestamps[0]["timestamp"] == 5.5
+        assert data.slide_timestamps[1]["timestamp"] == 30.2
+        # Verify timestamps JSON was saved
+        ts_file = tmp_path / "slide_timestamps.json"
+        assert ts_file.exists()
+
+    @patch("transcribe_critic.slides.subprocess.run")
+    def test_handles_no_timestamps(self, mock_run, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        video = tmp_path / "video.mp4"
+        video.write_text("fake video")
+        data = SpeechData(video_path=video)
+
+        slides_dir = tmp_path / "slides"
+        slides_dir.mkdir(exist_ok=True)
+        (slides_dir / "slide_0001.png").write_bytes(b"img1")
+
+        # ffmpeg runs but no pts_time in stderr
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        extract_slides(config, data)
+        assert len(data.slide_images) == 1
+        assert data.slide_timestamps[0]["timestamp"] == 0.0
+
+    @patch("transcribe_critic.slides.subprocess.run")
+    def test_saves_timestamps_json(self, mock_run, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        video = tmp_path / "video.mp4"
+        video.write_text("fake video")
+        data = SpeechData(video_path=video)
+
+        slides_dir = tmp_path / "slides"
+        slides_dir.mkdir(exist_ok=True)
+        (slides_dir / "slide_0001.png").write_bytes(b"img")
+
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="",
+            stderr="[Parsed_showinfo_1] pts_time:12.3\n",
+        )
+        extract_slides(config, data)
+        ts_data = json.loads((tmp_path / "slide_timestamps.json").read_text())
+        assert ts_data[0]["timestamp"] == 12.3
+        assert ts_data[0]["filename"] == "slide_0001.png"
+
+
+# ---------------------------------------------------------------------------
+# analyze_slides_with_vision — LLM execution path
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeSlidesWithVisionExecution:
+    @patch("transcribe_critic.slides.llm_call_with_retry")
+    @patch("transcribe_critic.slides.create_llm_client")
+    def test_analyzes_slides_with_mocked_llm(self, mock_client, mock_llm, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True,
+                              skip_existing=False)
+        slide = tmp_path / "slide_0001.png"
+        slide.write_bytes(b"\x89PNG\r\n\x1a\n")
+        data = SpeechData(slide_images=[slide])
+        data.title = "Test Talk"
+
+        mock_llm.return_value = MagicMock(
+            content=[MagicMock(text='{"type": "title", "title": "Welcome", "description": "Title slide"}')]
+        )
+
+        analyze_slides_with_vision(config, data)
+        assert data.slides_json_path is not None
+        assert len(data.slide_metadata) == 1
+        assert data.slide_metadata[0]["type"] == "title"
+        assert data.slide_metadata[0]["title"] == "Welcome"
+        # Verify JSON saved
+        saved = json.loads(data.slides_json_path.read_text())
+        assert saved["slide_count"] == 1
+
+    @patch("transcribe_critic.slides.llm_call_with_retry")
+    @patch("transcribe_critic.slides.create_llm_client")
+    def test_handles_non_json_response(self, mock_client, mock_llm, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True,
+                              skip_existing=False)
+        slide = tmp_path / "slide_0001.png"
+        slide.write_bytes(b"\x89PNG\r\n\x1a\n")
+        data = SpeechData(slide_images=[slide])
+        data.title = "Test"
+
+        # LLM returns plain text, not JSON
+        mock_llm.return_value = MagicMock(
+            content=[MagicMock(text="This is a content slide with bullet points")]
+        )
+
+        analyze_slides_with_vision(config, data)
+        assert data.slide_metadata[0]["type"] == "content"
+        assert "bullet points" in data.slide_metadata[0]["description"]
+
+    @patch("transcribe_critic.slides.llm_call_with_retry")
+    @patch("transcribe_critic.slides.create_llm_client")
+    def test_handles_invalid_json(self, mock_client, mock_llm, tmp_path):
+        config = SpeechConfig(url="x", output_dir=tmp_path, analyze_slides=True,
+                              skip_existing=False)
+        slide = tmp_path / "slide_0001.png"
+        slide.write_bytes(b"\x89PNG\r\n\x1a\n")
+        data = SpeechData(slide_images=[slide])
+        data.title = "Test"
+
+        # LLM returns something that looks like JSON but isn't valid
+        mock_llm.return_value = MagicMock(
+            content=[MagicMock(text='{invalid json here}')]
+        )
+
+        analyze_slides_with_vision(config, data)
+        assert data.slide_metadata[0]["type"] == "unknown"
+        assert "Could not parse" in data.slide_metadata[0]["description"]

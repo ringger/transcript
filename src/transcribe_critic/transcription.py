@@ -12,7 +12,7 @@ from pathlib import Path
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
-    WHISPER_MERGED_TXT,
+    WHISPER_MERGED_TXT, COMMON_WORDS, MLX_MODEL_MAP,
     create_llm_client, llm_call_with_retry,
     run_command, _save_json, _print_reusing, _dry_run_skip, _should_skip,
     check_dependencies, MODEL_SIZES,
@@ -20,6 +20,109 @@ from transcribe_critic.shared import (
 from transcribe_critic.merge import (
     _normalize_for_comparison, _write_temp_text, _parse_wdiff_tokens,
 )
+
+
+# ---------------------------------------------------------------------------
+# Repetition loop detection and collapsing (anti-hallucination)
+# ---------------------------------------------------------------------------
+
+def detect_repetition_loops(text: str, min_repeats: int = 4,
+                             max_phrase_words: int = 10) -> list[dict]:
+    """Detect consecutive repetition loops in text.
+
+    Returns a list of dicts with keys: phrase, count, start_pos, end_pos.
+    """
+    loops = []
+    words = text.split()
+    n = len(words)
+    i = 0
+
+    while i < n:
+        best_phrase_len = 0
+        best_count = 0
+
+        # Try phrase lengths from shortest to longest — prefer the shortest
+        # phrase with the most repeats (hallucinations repeat short phrases)
+        for phrase_len in range(1, min(max_phrase_words, (n - i) // min_repeats) + 1):
+            phrase = words[i:i + phrase_len]
+            count = 1
+            j = i + phrase_len
+            while j + phrase_len <= n and words[j:j + phrase_len] == phrase:
+                count += 1
+                j += phrase_len
+
+            if count >= min_repeats:
+                best_phrase_len = phrase_len
+                best_count = count
+                break  # Shortest repeating phrase found
+
+        if best_count >= min_repeats:
+            phrase_text = " ".join(words[i:i + best_phrase_len])
+            # Calculate character positions
+            prefix = " ".join(words[:i])
+            start_pos = len(prefix) + (1 if prefix else 0)
+            repeated_text = (" ".join([phrase_text] * best_count))
+            end_pos = start_pos + len(repeated_text)
+
+            loops.append({
+                "phrase": phrase_text,
+                "count": best_count,
+                "start_pos": start_pos,
+                "end_pos": end_pos,
+            })
+            i += best_phrase_len * best_count
+        else:
+            i += 1
+
+    return loops
+
+
+def collapse_repetition_loops(text: str, min_repeats: int = 4,
+                               max_phrase_words: int = 10) -> tuple[str, list[dict]]:
+    """Collapse consecutive repetition loops, keeping only 2 occurrences.
+
+    Returns (collapsed_text, loops_found).
+    """
+    loops = detect_repetition_loops(text, min_repeats, max_phrase_words)
+    if not loops:
+        return text, []
+
+    # Rebuild text with loops collapsed (work on word array)
+    words = text.split()
+    result_words = []
+    i = 0
+    n = len(words)
+
+    for loop in sorted(loops, key=lambda l: l["start_pos"]):
+        phrase_words = loop["phrase"].split()
+        phrase_len = len(phrase_words)
+        total_len = phrase_len * loop["count"]
+
+        # Find the word index where this loop starts
+        # Walk forward to find the matching position
+        while i < n:
+            # Check if current position is the start of this loop
+            if (i + total_len <= n and
+                    words[i:i + phrase_len] == phrase_words):
+                # Verify this is actually the full loop
+                is_loop = True
+                for k in range(loop["count"]):
+                    if words[i + k * phrase_len:i + (k + 1) * phrase_len] != phrase_words:
+                        is_loop = False
+                        break
+                if is_loop:
+                    # Keep only 2 occurrences
+                    result_words.extend(phrase_words)
+                    result_words.extend(phrase_words)
+                    i += total_len
+                    break
+            result_words.append(words[i])
+            i += 1
+
+    # Append remaining words
+    result_words.extend(words[i:])
+
+    return " ".join(result_words), loops
 
 
 def _select_largest_model_json(data: SpeechData):
@@ -135,19 +238,12 @@ def _parse_wdiff_diffs(text_a: str, text_b: str, config: SpeechConfig) -> list[d
 
 def _filter_trivial_diffs(diffs: list[dict]) -> list[dict]:
     """Remove diffs where both sides are only common/stop words."""
-    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at',
-                    'to', 'for', 'of', 'is', 'it', 'i', 'we', 'he', 'she',
-                    'they', 'you', 'my', 'your', 'his', 'her', 'its', 'our',
-                    'their', 'this', 'that', 'was', 'were', 'be', 'been',
-                    'has', 'have', 'had', 'do', 'does', 'did', 'will',
-                    'would', 'could', 'should', 'may', 'might', 'not', 'no',
-                    'so', 'if', 'then', 'than', 'just', 'also', 'very'}
     filtered = []
     for d in diffs:
         a_words = set(d["a_text"].lower().split()) if d["a_text"] else set()
         b_words = set(d["b_text"].lower().split()) if d["b_text"] else set()
         # Keep if either side has a non-trivial word
-        if not (a_words <= common_words and b_words <= common_words):
+        if not (a_words <= COMMON_WORDS and b_words <= COMMON_WORDS):
             filtered.append(d)
     return filtered
 
@@ -651,7 +747,7 @@ def _apply_resolutions(base_words: list[str], diffs: list[dict],
 def transcribe_audio(config: SpeechConfig, data: SpeechData) -> None:
     """Transcribe audio using Whisper, supporting multiple models for ensembling."""
     print()
-    print("[2] Transcribing audio...")
+    print("[transcribe] Transcribing audio...")
 
     if not config.dry_run and (not data.audio_path or not data.audio_path.exists()):
         raise FileNotFoundError(f"Audio file not found: {data.audio_path}")
@@ -698,10 +794,6 @@ def _run_whisper_model(config: SpeechConfig, data: SpeechData, model: str, deps:
     print(f"  Running Whisper {model}...")
 
     if deps["mlx_whisper"]:
-        # Map model short names to mlx-community HuggingFace model IDs
-        MLX_MODEL_MAP = {
-            "distil-large-v3": "mlx-community/distil-whisper-large-v3",
-        }
         model_name = MLX_MODEL_MAP.get(model, f"mlx-community/whisper-{model}-mlx")
 
         # mlx_whisper outputs to input filename, so we need to work around this
@@ -867,107 +959,6 @@ def _clean_llm_output(text: str) -> str:
             continue
         cleaned.append(line)
     return "\n".join(cleaned).strip()
-
-
-def detect_repetition_loops(text: str, min_repeats: int = 4,
-                             max_phrase_words: int = 10) -> list[dict]:
-    """Detect consecutive repetition loops in text.
-
-    Returns a list of dicts with keys: phrase, count, start_pos, end_pos.
-    """
-    loops = []
-    words = text.split()
-    n = len(words)
-    i = 0
-
-    while i < n:
-        best_phrase_len = 0
-        best_count = 0
-
-        # Try phrase lengths from shortest to longest — prefer the shortest
-        # phrase with the most repeats (hallucinations repeat short phrases)
-        for phrase_len in range(1, min(max_phrase_words, (n - i) // min_repeats) + 1):
-            phrase = words[i:i + phrase_len]
-            count = 1
-            j = i + phrase_len
-            while j + phrase_len <= n and words[j:j + phrase_len] == phrase:
-                count += 1
-                j += phrase_len
-
-            if count >= min_repeats:
-                best_phrase_len = phrase_len
-                best_count = count
-                break  # Shortest repeating phrase found
-
-        if best_count >= min_repeats:
-            phrase_text = " ".join(words[i:i + best_phrase_len])
-            # Calculate character positions
-            prefix = " ".join(words[:i])
-            start_pos = len(prefix) + (1 if prefix else 0)
-            repeated_text = (" ".join([phrase_text] * best_count))
-            end_pos = start_pos + len(repeated_text)
-
-            loops.append({
-                "phrase": phrase_text,
-                "count": best_count,
-                "start_pos": start_pos,
-                "end_pos": end_pos,
-            })
-            i += best_phrase_len * best_count
-        else:
-            i += 1
-
-    return loops
-
-
-def collapse_repetition_loops(text: str, min_repeats: int = 4,
-                               max_phrase_words: int = 10) -> tuple[str, list[dict]]:
-    """Collapse consecutive repetition loops, keeping only 2 occurrences.
-
-    Returns (collapsed_text, loops_found).
-    """
-    loops = detect_repetition_loops(text, min_repeats, max_phrase_words)
-    if not loops:
-        return text, []
-
-    # Rebuild text with loops collapsed (work on word array)
-    words = text.split()
-    result_words = []
-    i = 0
-    n = len(words)
-
-    for loop in sorted(loops, key=lambda l: l["start_pos"]):
-        phrase_words = loop["phrase"].split()
-        phrase_len = len(phrase_words)
-        total_len = phrase_len * loop["count"]
-
-        # Find the word index where this loop starts
-        # Walk forward to find the matching position
-        while i < n:
-            # Check if current position is the start of this loop
-            if (i + total_len <= n and
-                    words[i:i + phrase_len] == phrase_words):
-                # Verify this is actually the full loop
-                is_loop = True
-                for k in range(loop["count"]):
-                    if words[i + k * phrase_len:i + (k + 1) * phrase_len] != phrase_words:
-                        is_loop = False
-                        break
-                if is_loop:
-                    # Keep only 2 occurrences
-                    result_words.extend(phrase_words)
-                    result_words.extend(phrase_words)
-                    i += total_len
-                    break
-            result_words.append(words[i])
-            i += 1
-
-    # Append remaining words
-    result_words.extend(words[i:])
-
-    return " ".join(result_words), loops
-
-
 
 
 def _load_transcript_segments(data: SpeechData) -> None:

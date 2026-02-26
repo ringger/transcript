@@ -4,13 +4,15 @@ Speech Transcriber
 ==================
 Automates transcription of speeches from video URLs.
 
-Pipeline:
-1. Download audio, video, and captions (yt-dlp)
-2. Transcribe audio (mlx-whisper or openai-whisper)
-3. Extract slides via scene detection (ffmpeg)
-4. Optionally analyze slides with vision API (Claude)
-4b. Optionally merge YouTube captions + Whisper into "critical text" (wdiff + Claude)
-5. Generate markdown with slides interleaved at correct timestamps
+Pipeline steps:
+  download   - Download audio, video, and captions (yt-dlp)
+  transcribe - Transcribe audio (mlx-whisper or openai-whisper)
+  ensemble   - Adjudicate multiple Whisper transcripts (wdiff + LLM)
+  diarize    - Speaker diarization (pyannote, optional)
+  slides     - Extract and optionally analyze slides (ffmpeg + vision LLM)
+  merge      - Merge transcript sources into critical text (wdiff + LLM)
+  markdown   - Generate markdown with slides interleaved at timestamps
+  analysis   - Analyze source survival statistics
 
 Usage:
     transcribe-critic <url> [options]
@@ -52,11 +54,14 @@ from transcribe_critic import __version__
 from transcribe_critic.shared import (
     tprint as print,
     SpeechConfig, SpeechData, is_up_to_date,
+    MODEL_SIZES,
+    DEFAULT_CLAUDE_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL,
+    DEFAULT_WHISPER_MODELS,
     AUDIO_MP3, AUDIO_WAV, CAPTIONS_VTT, WHISPER_MERGED_TXT,
     DIARIZATION_JSON, DIARIZED_TXT, TRANSCRIPT_MERGED_TXT,
     ANALYSIS_MD, SLIDE_TIMESTAMPS_JSON,
     run_command, _print_reusing, _dry_run_skip, _should_skip,
-    _collect_source_paths, check_dependencies,
+    _collect_source_paths, _is_url, check_dependencies,
 )
 
 SECTION_SEPARATOR = "=" * 50
@@ -198,7 +203,7 @@ def _load_external_transcript(config: SpeechConfig) -> tuple:
     """
     source = config.external_transcript
     source_label = source
-    if source.startswith(("http://", "https://")):
+    if _is_url(source):
         print(f"  Fetching external transcript from URL...")
         import urllib.request
         try:
@@ -306,7 +311,7 @@ def print_cost_estimate(config: SpeechConfig, num_slides: int = 45, transcript_w
 def merge_transcript_sources(config: SpeechConfig, data: SpeechData) -> None:
     """Merge transcript sources (Whisper, captions, external) using wdiff alignment and LLM adjudication."""
     print()
-    print("[4b] Merging transcript sources...")
+    print("[merge] Merging transcript sources...")
 
     if not config.merge_sources:
         print("  Skipped (--no-merge flag set)")
@@ -451,7 +456,7 @@ def _strip_structured_headers(text: str) -> str:
 def analyze_source_survival(config: SpeechConfig, data: SpeechData) -> None:
     """Analyze how much of each source transcript survived into the merged output."""
     print()
-    print("[6] Analyzing source survival...")
+    print("[analysis] Analyzing source survival...")
 
     merged_path = config.output_dir / TRANSCRIPT_MERGED_TXT
     analysis_path = config.output_dir / ANALYSIS_MD
@@ -595,9 +600,10 @@ Examples:
 
     # Whisper
     whisper_group = parser.add_argument_group("whisper")
-    whisper_group.add_argument("--whisper-models", default="small,medium,distil-large-v3",
-                        help="Whisper model(s) to use, comma-separated (default: small,medium,distil-large-v3). "
-                             "Options: tiny, base, small, medium, large, distil-large-v3. "
+    _default_whisper = ",".join(DEFAULT_WHISPER_MODELS)
+    whisper_group.add_argument("--whisper-models", default=_default_whisper,
+                        help=f"Whisper model(s) to use, comma-separated (default: {_default_whisper}). "
+                             f"Options: {', '.join(MODEL_SIZES)}. "
                              "Multiple models enables ensembling for better accuracy")
 
     # Slides
@@ -617,12 +623,12 @@ Examples:
                         help="Use Anthropic Claude API instead of local Ollama (requires API key)")
     llm_group.add_argument("--api-key",
                         help="Anthropic API key (or set ANTHROPIC_API_KEY env var; implies --api)")
-    llm_group.add_argument("--claude-model", default="claude-sonnet-4-20250514",
-                        help="Claude model for API calls (default: claude-sonnet-4-20250514)")
-    llm_group.add_argument("--local-model", default="qwen2.5:14b",
-                        help="Ollama model for text tasks (default: qwen2.5:14b)")
-    llm_group.add_argument("--ollama-url", default="http://localhost:11434/v1/",
-                        help="Ollama server URL (default: http://localhost:11434/v1/)")
+    llm_group.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL,
+                        help=f"Claude model for API calls (default: {DEFAULT_CLAUDE_MODEL})")
+    llm_group.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL,
+                        help=f"Ollama model for text tasks (default: {DEFAULT_LOCAL_MODEL})")
+    llm_group.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL,
+                        help=f"Ollama server URL (default: {DEFAULT_OLLAMA_URL})")
     llm_group.add_argument("--no-llm", action="store_true",
                         help="Skip all LLM-dependent features (merging, ensembling, slide analysis)")
     llm_group.add_argument("--no-merge", action="store_true",
@@ -696,11 +702,10 @@ Examples:
 
     # Parse whisper models (comma-separated)
     whisper_models = [m.strip() for m in args.whisper_models.split(",")]
-    valid_models = ["tiny", "base", "small", "medium", "large", "distil-large-v3"]
     for m in whisper_models:
-        if m not in valid_models:
+        if m not in MODEL_SIZES:
             print(f"Invalid Whisper model: {m}")
-            print(f"Valid options: {', '.join(valid_models)}")
+            print(f"Valid options: {', '.join(MODEL_SIZES)}")
             sys.exit(1)
 
     # Determine LLM backend: --api or --api-key switches to cloud API
@@ -749,7 +754,7 @@ Examples:
 
     # Validate external transcript source
     if config.external_transcript:
-        if config.external_transcript.startswith(("http://", "https://")):
+        if _is_url(config.external_transcript):
             import urllib.request
             try:
                 req = urllib.request.Request(config.external_transcript, method='HEAD')

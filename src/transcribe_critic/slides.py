@@ -23,7 +23,7 @@ from transcribe_critic.shared import (
 def extract_slides(config: SpeechConfig, data: SpeechData) -> None:
     """Extract slides from video using ffmpeg scene detection, capturing timestamps."""
     print()
-    print("[3] Extracting slides...")
+    print("[slides] Extracting slides...")
 
     if not data.video_path or not data.video_path.exists():
         print("  No video file available, skipping slide extraction")
@@ -105,7 +105,7 @@ def _load_slide_timestamps(data: SpeechData, timestamps_file: Path) -> None:
 def analyze_slides_with_vision(config: SpeechConfig, data: SpeechData) -> None:
     """Analyze slides using Claude vision API."""
     print()
-    print("[4] Analyzing slides with vision API...")
+    print("[slides] Analyzing slides with vision API...")
 
     if not config.analyze_slides:
         print("  Skipped (use --analyze-slides to enable)")

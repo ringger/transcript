@@ -29,7 +29,7 @@ def diarize_audio(config: SpeechConfig, data: SpeechData) -> None:
         return
 
     print()
-    print("[2b] Diarizing audio...")
+    print("[diarize] Diarizing audio...")
 
     diarization_json = config.output_dir / DIARIZATION_JSON
     diarized_txt = config.output_dir / DIARIZED_TXT

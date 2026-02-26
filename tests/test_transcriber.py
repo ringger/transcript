@@ -11,6 +11,7 @@ from transcribe_critic.merge import _format_structured_segments
 from transcribe_critic.download import clean_vtt_captions
 from transcribe_critic.output import generate_markdown
 from transcribe_critic.transcriber import (
+    _fetch_metadata,
     _hydrate_data,
     _load_external_transcript,
     _should_run_step,
@@ -19,6 +20,7 @@ from transcribe_critic.transcriber import (
     analyze_source_survival,
     estimate_api_cost,
     merge_transcript_sources,
+    print_cost_estimate,
 )
 
 
@@ -648,3 +650,190 @@ class TestHydrateData:
         assert data.audio_path is None
         assert data.transcript_path is None
         assert data.whisper_transcripts == {}
+
+
+# ---------------------------------------------------------------------------
+# merge_transcript_sources — edge cases
+# ---------------------------------------------------------------------------
+
+class TestMergeTranscriptSourcesEdges:
+    def test_skips_when_no_merge_flag(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path, merge_sources=False)
+        data = SpeechData()
+        merge_transcript_sources(config, data)
+        out = capsys.readouterr().out
+        assert "--no-merge" in out
+
+    def test_skips_when_no_llm(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path, no_llm=True)
+        data = SpeechData()
+        merge_transcript_sources(config, data)
+        out = capsys.readouterr().out
+        assert "--no-llm" in out
+
+    def test_skips_no_whisper_no_external(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        merge_transcript_sources(config, data)
+        out = capsys.readouterr().out
+        assert "No Whisper transcript" in out
+
+    def test_skips_single_source_no_diarized(self, tmp_path, capsys):
+        """Only whisper, no captions/external/diarized → need at least 2 sources."""
+        whisper = tmp_path / "whisper_merged.txt"
+        whisper.write_text("hello world " * 50)
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        data = SpeechData(transcript_path=whisper)
+        merge_transcript_sources(config, data)
+        out = capsys.readouterr().out
+        assert "No YouTube captions" in out
+
+    @patch("transcribe_critic.transcriber._merge_multi_source", return_value="merged result text")
+    def test_flat_merge_calls_multi_source(self, mock_merge, tmp_path, capsys):
+        """Whisper + captions (no structure) → flat merge via _merge_multi_source."""
+        whisper = tmp_path / "whisper_merged.txt"
+        whisper.write_text("hello world test transcript " * 50)
+        captions = tmp_path / "captions.en.vtt"
+        captions.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:05.000\nhello world\n")
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False,
+                              local=False, api_key="fake")
+        data = SpeechData(transcript_path=whisper, captions_path=captions)
+        merge_transcript_sources(config, data)
+        mock_merge.assert_called_once()
+        assert data.merged_transcript_path is not None
+
+
+# ---------------------------------------------------------------------------
+# analyze_source_survival
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeSourceSurvival:
+    def test_no_merged_transcript_skips(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path)
+        data = SpeechData()
+        analyze_source_survival(config, data)
+        out = capsys.readouterr().out
+        assert "No merged transcript" in out
+
+    def test_no_sources_skips(self, tmp_path, capsys):
+        merged = tmp_path / "transcript_merged.txt"
+        merged.write_text("merged text here")
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        data = SpeechData()
+        analyze_source_survival(config, data)
+        out = capsys.readouterr().out
+        assert "No source transcripts" in out
+
+    def test_writes_analysis_md(self, tmp_path, capsys):
+        """With whisper + captions + merged → writes analysis.md with table."""
+        whisper = tmp_path / "whisper_merged.txt"
+        whisper.write_text("the quick brown fox jumps over the lazy dog")
+        captions = tmp_path / "captions.en.vtt"
+        captions.write_text(
+            "WEBVTT\n\n00:00:01.000 --> 00:00:05.000\n"
+            "the quick brown fox jumps over the lazy dog\n"
+        )
+        merged = tmp_path / "transcript_merged.txt"
+        merged.write_text("the quick brown fox jumps over the lazy dog")
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        data = SpeechData(
+            transcript_path=whisper,
+            captions_path=captions,
+            merged_transcript_path=merged,
+        )
+        analyze_source_survival(config, data)
+        analysis = tmp_path / "analysis.md"
+        assert analysis.exists()
+        content = analysis.read_text()
+        assert "Source Survival Analysis" in content
+        assert "Whisper" in content
+
+    def test_finds_most_similar(self, tmp_path, capsys):
+        whisper = tmp_path / "whisper_merged.txt"
+        whisper.write_text("the quick brown fox jumps over the lazy dog")
+        merged = tmp_path / "transcript_merged.txt"
+        merged.write_text("the quick brown fox jumps over the lazy dog")
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        data = SpeechData(
+            transcript_path=whisper,
+            merged_transcript_path=merged,
+        )
+        analyze_source_survival(config, data)
+        out = capsys.readouterr().out
+        assert "most closely resembles" in out
+
+
+# ---------------------------------------------------------------------------
+# print_cost_estimate
+# ---------------------------------------------------------------------------
+
+class TestPrintCostEstimate:
+    def test_zero_cost_prints_nothing(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path, no_llm=True)
+        print_cost_estimate(config)
+        out = capsys.readouterr().out
+        assert "ESTIMATED" not in out
+
+    def test_nonzero_prints_table(self, tmp_path, capsys):
+        config = SpeechConfig(url="x", output_dir=tmp_path,
+                              analyze_slides=True, whisper_models=["medium"])
+        print_cost_estimate(config, num_slides=10, transcript_words=5000)
+        out = capsys.readouterr().out
+        assert "ESTIMATED API COSTS" in out
+        assert "TOTAL" in out
+
+
+# ---------------------------------------------------------------------------
+# _fetch_metadata
+# ---------------------------------------------------------------------------
+
+class TestFetchMetadata:
+    @patch("transcribe_critic.shared.subprocess.run")
+    def test_returns_parsed_json(self, mock_run):
+        import json
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"title": "Test Video", "id": "abc"}),
+            returncode=0,
+        )
+        result = _fetch_metadata("https://example.com/v")
+        assert result["title"] == "Test Video"
+
+    @patch("transcribe_critic.shared.subprocess.run",
+           side_effect=Exception("not found"))
+    def test_propagates_error(self, mock_run):
+        with pytest.raises(Exception, match="not found"):
+            _fetch_metadata("https://example.com/bad")
+
+
+# ---------------------------------------------------------------------------
+# main() CLI validation
+# ---------------------------------------------------------------------------
+
+class TestMainCLI:
+    def test_missing_url_exits(self):
+        """No positional arg → SystemExit."""
+        import sys
+        from transcribe_critic.transcriber import main
+        with patch.object(sys, "argv", ["transcribe-critic"]):
+            with pytest.raises(SystemExit):
+                main()
+
+    def test_invalid_model_exits(self):
+        import sys
+        from transcribe_critic.transcriber import main
+        with patch.object(sys, "argv",
+                          ["transcribe-critic", "https://example.com/v",
+                           "--whisper-models", "bogus"]):
+            with pytest.raises(SystemExit):
+                main()
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_api_no_key_exits(self):
+        import sys
+        from transcribe_critic.transcriber import main
+        with patch.object(sys, "argv",
+                          ["transcribe-critic", "https://example.com/v", "--api"]):
+            # Remove ANTHROPIC_API_KEY if set
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": ""}, clear=False):
+                with pytest.raises(SystemExit):
+                    main()

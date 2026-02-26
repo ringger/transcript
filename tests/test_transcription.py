@@ -2,6 +2,7 @@
 
 import json
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -918,5 +919,169 @@ class TestCollapseRepetitionLoops:
         assert result.count("oh no") == 2
         assert result.startswith("start")
         assert result.endswith("end")
+
+
+# ---------------------------------------------------------------------------
+# _run_whisper_model — hallucination collapse on output
+# ---------------------------------------------------------------------------
+
+class TestRunWhisperModelHallucinationCollapse:
+    @patch("transcribe_critic.transcription.run_command")
+    def test_collapses_hallucination_in_output(self, mock_run, tmp_path, capsys):
+        """After whisper produces output with repetitions, they get collapsed."""
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+        data = SpeechData(audio_path=tmp_path / "audio.mp3")
+        data.audio_path.write_text("fake")
+        deps = {"mlx_whisper": True, "whisper": False}
+
+        # Simulate mlx_whisper creating output with repetitions
+        def create_hallucinated_output(cmd, desc, verbose=False):
+            hallucinated = "The unremarkable. " * 100 + "Good morning everyone."
+            (tmp_path / "audio.txt").write_text(hallucinated)
+            (tmp_path / "audio.json").write_text('{"segments": []}')
+            return MagicMock()
+        mock_run.side_effect = create_hallucinated_output
+
+        _run_whisper_model(config, data, "small", deps)
+        text = (tmp_path / "whisper_small.txt").read_text()
+        # Should be collapsed to 2 occurrences
+        assert text.count("The unremarkable.") == 2
+        assert "Good morning everyone." in text
+        out = capsys.readouterr().out
+        assert "Collapsed" in out
+        assert "hallucination" in out
+
+
+# ---------------------------------------------------------------------------
+# _call_and_parse_cluster — LLM response parsing
+# ---------------------------------------------------------------------------
+
+class TestCallAndParseCluster:
+    def test_parses_two_way_responses(self):
+        from transcribe_critic.transcription import _call_and_parse_cluster
+        client = MagicMock()
+        config = SpeechConfig(url="x", output_dir=Path("/tmp"), local=True)
+
+        cluster = [
+            {"type": "substitution", "a_text": "dog", "b_text": "cat",
+             "a_pos": 1, "b_pos": 1, "a_len": 1, "b_len": 1},
+            {"type": "substitution", "a_text": "ran", "b_text": "run",
+             "a_pos": 3, "b_pos": 3, "a_len": 1, "b_len": 1},
+        ]
+
+        # Mock LLM response
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="1. A\n2. B")]
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        with patch("transcribe_critic.transcription.llm_call_with_retry",
+                   return_value=mock_response):
+            choices, resolutions = _call_and_parse_cluster(
+                client, config, cluster, "prompt", "")
+
+        assert choices[0] == "A"
+        assert choices[1] == "B"
+        assert resolutions[id(cluster[0])] == "dog"
+        assert resolutions[id(cluster[1])] == "run"
+
+    def test_parses_multi_way_responses(self):
+        from transcribe_critic.transcription import _call_and_parse_cluster
+        client = MagicMock()
+        config = SpeechConfig(url="x", output_dir=Path("/tmp"), local=True)
+
+        cluster = [
+            {"type": "substitution", "b_pos": 1, "b_len": 1,
+             "readings": {"small": "dog", "medium": "cat", "distil-large-v3": "cat"}},
+        ]
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="1. B")]
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5)
+        with patch("transcribe_critic.transcription.llm_call_with_retry",
+                   return_value=mock_response):
+            choices, resolutions = _call_and_parse_cluster(
+                client, config, cluster, "prompt", "")
+
+        assert choices[0] == "B"
+        assert resolutions[id(cluster[0])] == "cat"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_whisper_diffs — end-to-end with mocked LLM
+# ---------------------------------------------------------------------------
+
+class TestResolveWhisperDiffs:
+    @patch("transcribe_critic.transcription._call_and_parse_cluster")
+    @patch("transcribe_critic.transcription.create_llm_client")
+    def test_resolves_diffs_and_applies(self, mock_client, mock_call, tmp_path):
+        from transcribe_critic.transcription import _resolve_whisper_diffs
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+
+        base_text = "the quick brown fox jumps over the lazy dog"
+        all_transcripts = {
+            "medium": base_text,
+            "small": "the quick red fox jumps over the lazy cat",
+        }
+
+        # Mock cluster resolution: choose base (B) for all diffs
+        def resolve_cluster(client, cfg, cluster, prompt, warning):
+            choices = []
+            resolutions = {}
+            for d in cluster:
+                choices.append("B")
+                resolutions[id(d)] = d["b_text"] if d.get("b_text") else ""
+            return choices, resolutions
+        mock_call.side_effect = resolve_cluster
+
+        result = _resolve_whisper_diffs(base_text, all_transcripts, config)
+        # Base text should be preserved (chose B = base)
+        assert "brown" in result
+        assert "dog" in result
+
+    @patch("transcribe_critic.transcription.create_llm_client")
+    def test_no_diffs_returns_base(self, mock_client, tmp_path, capsys):
+        from transcribe_critic.transcription import _resolve_whisper_diffs
+        config = SpeechConfig(url="x", output_dir=tmp_path, skip_existing=False)
+
+        # Same text for both models → no diffs
+        text = "the quick brown fox"
+        all_transcripts = {"medium": text, "small": text}
+        result = _resolve_whisper_diffs(text, all_transcripts, config)
+        assert result == text
+        out = capsys.readouterr().out
+        assert "No meaningful differences" in out
+
+
+# ---------------------------------------------------------------------------
+# _ensemble_whisper_transcripts — dry-run checkpoint status
+# ---------------------------------------------------------------------------
+
+class TestEnsembleDryRunCheckpoints:
+    def test_dry_run_shows_cached_cluster_count(self, tmp_path, capsys):
+        """Dry-run with cached clusters shows 'X/Y clusters cached'."""
+        config = SpeechConfig(url="x", output_dir=tmp_path, dry_run=True,
+                              skip_existing=False)
+        # Create whisper transcripts
+        data = SpeechData(audio_path=tmp_path / "audio.mp3")
+        data.audio_path.write_text("fake")
+        small_txt = tmp_path / "whisper_small.txt"
+        medium_txt = tmp_path / "whisper_medium.txt"
+        small_txt.write_text("small text")
+        medium_txt.write_text("medium text")
+        data.whisper_transcripts = {
+            "small": {"txt": small_txt, "json": None},
+            "medium": {"txt": medium_txt, "json": None},
+        }
+
+        # Create ensemble checkpoint dir with some cached clusters
+        ensemble_dir = tmp_path / "ensemble_chunks"
+        ensemble_dir.mkdir()
+        time.sleep(0.05)
+        (ensemble_dir / "cluster_000.json").write_text('{"choices": ["A"]}')
+        (ensemble_dir / "cluster_001.json").write_text('{"choices": ["B"]}')
+
+        _ensemble_whisper_transcripts(config, data)
+        out = capsys.readouterr().out
+        assert "[dry-run]" in out
+        assert "clusters cached" in out
 
 
