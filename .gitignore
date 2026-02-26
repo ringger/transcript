@@ -5,6 +5,7 @@
 *.webm
 
 # Python
+.coverage
 __pycache__/
 *.py[cod]
 *$py.class
