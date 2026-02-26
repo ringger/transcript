@@ -21,7 +21,8 @@ The approach applies principles from [textual criticism](https://en.wikipedia.or
 - **Checkpoint resumption**: Long operations save checkpoints and resume after interruption — merge chunks, diarization segmentation, and embedding extraction all checkpoint independently
 - **Cost estimation**: Shows estimated API costs before running (`--dry-run` for estimation only)
 - **Local-first LLM**: Uses Ollama by default for free, local operation — no API key needed
-- **Speaker diarization**: Identifies who is speaking using pyannote.audio, with automatic or manual speaker naming — LLM speaker identification uses video metadata (title, description) for correct name spellings
+- **Speaker diarization**: On by default — identifies who is speaking using pyannote.audio, with automatic or manual speaker naming — LLM speaker identification uses video metadata (title, description) for correct name spellings
+- **Transcript summarization**: Generates a structured summary (overview, key points, speakers, notable quotes) using an independently configurable LLM — can use a different model/backend than the adjudication LLM
 - **Timestamped logging**: All pipeline output prefixed with `[HH:MM:SS]` wall-clock timestamps for log correlation during long runs
 - **Whisper-only mode**: `--no-llm` to skip all LLM features and run Whisper only
 
@@ -85,16 +86,20 @@ transcribe-critic --podcast "https://podcasts.apple.com/us/podcast/..."
 
 ### Speaker Diarization
 
+Diarization is on by default. It requires `pyannote.audio` and a HuggingFace token:
+
 ```bash
-# Identify who is speaking (requires pyannote.audio and HF_TOKEN)
 pip install transcribe-critic[diarize]
 export HF_TOKEN="hf_..."  # HuggingFace token with pyannote model access
 
 # Auto-detect speaker names from introductions
-transcribe-critic --diarize --num-speakers 2 --podcast "https://..."
+transcribe-critic --num-speakers 2 --podcast "https://..."
 
 # Manual speaker names (in order of first appearance)
-transcribe-critic --diarize --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
+transcribe-critic --speaker-names "Ross Douthat,Dario Amodei" --podcast "https://..."
+
+# Disable diarization
+transcribe-critic --no-diarize "https://..."
 ```
 
 ### Speech-Only (No Slides)
@@ -150,13 +155,36 @@ transcribe-critic "https://youtube.com/watch?v=..." --steps transcribe,merge -o 
 transcribe-critic "https://youtube.com/watch?v=..." -v
 ```
 
+### Summarization
+
+Summarization runs by default after markdown generation, producing a `summary.md`. It uses the diarized transcript when available (for speaker-aware summaries), falling back to the merged or Whisper transcript.
+
+```bash
+# Default: summarize with the same LLM as adjudication (local Ollama)
+transcribe-critic "https://youtube.com/watch?v=..."
+
+# Use a different model for summaries (e.g., Opus for summaries, Sonnet for adjudication)
+transcribe-critic "https://youtube.com/watch?v=..." --api \
+    --summary-model claude-opus-4-20250514
+
+# Use Claude API for summaries even when adjudication uses local Ollama
+transcribe-critic "https://youtube.com/watch?v=..." \
+    --summary-api --summary-model claude-sonnet-4-20250514
+
+# Re-run just the summarization step
+transcribe-critic "https://youtube.com/watch?v=..." --steps summarize -o ./my_transcript
+
+# Disable summarization
+transcribe-critic "https://youtube.com/watch?v=..." --no-summarize
+```
+
 ## Output Files
 
 ```
 output_dir/
 ├── metadata.json                 # Source URL, title, duration, etc.
 ├── audio.mp3                     # Downloaded audio
-├── audio.wav                     # Converted for diarization (if --diarize)
+├── audio.wav                     # Converted for diarization (default; skipped with --no-diarize)
 ├── video.mp4                     # Downloaded video (if slides enabled)
 ├── captions.en.vtt               # YouTube captions (if available)
 ├── whisper_small.txt              # Whisper small transcript
@@ -166,11 +194,12 @@ output_dir/
 ├── whisper_distil-large-v3.txt    # Whisper distil-large-v3 transcript
 ├── whisper_distil-large-v3.json   # Whisper distil-large-v3 with timestamps
 ├── whisper_merged.txt             # Merged from multiple Whisper models via adjudication
-├── diarization.json              # Speaker segments (if --diarize)
-├── diarization_segmentation.npy  # Cached segmentation (if --diarize)
-├── diarization_embeddings.npy    # Cached embeddings (if --diarize)
-├── diarized.txt                  # Speaker-labeled transcript (if --diarize)
+├── diarization.json              # Speaker segments (default; skipped with --no-diarize)
+├── diarization_segmentation.npy  # Cached segmentation (default; skipped with --no-diarize)
+├── diarization_embeddings.npy    # Cached embeddings (default; skipped with --no-diarize)
+├── diarized.txt                  # Speaker-labeled transcript (default; skipped with --no-diarize)
 ├── transcript_merged.txt         # Critical text (merged from all sources)
+├── summary.md                    # Transcript summary (structured Markdown)
 ├── analysis.md                   # Source survival analysis
 ├── transcript.md                 # Final markdown output
 ├── merge_chunks/                 # Per-chunk checkpoints (resumable)
@@ -193,14 +222,15 @@ Optional stages are skipped based on flags. Stage numbers are fixed regardless o
 | [1] Download media | `download` | yt-dlp | No |
 | [2] Transcribe audio | `transcribe` | mlx-whisper | No |
 | [2b] Whisper ensemble | `ensemble` | LLM + wdiff | Yes (on by default with 2+ models; default: 3 models) |
-| [2c] Speaker diarization | `diarize` | pyannote.audio | Yes (`--diarize`) |
+| [2c] Speaker diarization | `diarize` | pyannote.audio | Yes (on by default; `--no-diarize` to skip) |
 | [3] Extract slides | `slides` | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
 | [4] Analyze slides with vision | `slides` | LLM + vision | Yes (`--analyze-slides`) |
 | [4b] Merge transcript sources | `merge` | LLM + wdiff | Yes (on by default; `--no-merge` to skip) |
 | [5] Generate markdown | `markdown` | Python | No |
+| [5b] Summarize transcript | `summarize` | LLM | Yes (on by default; `--no-summarize` to skip) |
 | [6] Source survival analysis | `analysis` | wdiff | No |
 
-Use `--steps <step1>,<step2>,...` to run only specific stages. Existing outputs from skipped stages are loaded automatically. This is useful for re-running just the ensemble or merge after fixing a bug, without re-downloading or re-transcribing.
+Use `--steps <step1>,<step2>,...` to run only specific stages. Existing outputs from skipped stages are loaded automatically. This is useful for re-running just the ensemble, merge, or summarize after fixing a bug, without re-downloading or re-transcribing.
 
 ## How It Works
 
@@ -262,7 +292,7 @@ This targeted diff resolution avoids the problems of full-text rewriting (chunk-
 
 ### Speaker Diarization
 
-When `--diarize` is enabled, the pipeline identifies who is speaking at each point in the audio by combining two independent signals:
+By default, the pipeline identifies who is speaking at each point in the audio by combining two independent signals:
 
 1. **pyannote.audio** runs a neural segmentation model over the audio in sliding ~5-second windows, producing frame-level speaker activity probabilities. A global clustering step stitches local predictions across the full recording into consistent speaker labels (SPEAKER_00, SPEAKER_01, etc.). The model handles overlapping speech natively and operates purely on the audio signal — no linguistic content is used.
 
@@ -301,6 +331,7 @@ ESTIMATED API COSTS
 | Whisper ensemble | $0.05–$0.15 | $0.50–$1.00 |
 | Source merging (2 sources) | $0.10–$0.30 | $0.50–$1.00 |
 | Source merging (3 sources) | $0.15–$0.40 | $1.00–$2.00 |
+| Summarization | $0.01–$0.05 | $0.05–$0.15 |
 | Slide analysis | $0.50–$2.00 | N/A |
 | Local Ollama (default) | **Free** | **Free** |
 | `--no-llm` | **Free** | **Free** |
