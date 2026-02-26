@@ -67,7 +67,7 @@ from transcribe_critic.shared import (
 SECTION_SEPARATOR = "=" * 50
 
 # Valid pipeline step names
-VALID_STEPS = {"download", "transcribe", "ensemble", "diarize", "slides", "merge", "markdown", "analysis"}
+VALID_STEPS = {"download", "transcribe", "ensemble", "diarize", "slides", "merge", "markdown", "summarize", "analysis"}
 
 
 def _should_run_step(step_name: str, config: SpeechConfig) -> bool:
@@ -643,19 +643,32 @@ Examples:
 
     # Diarization
     diarize_group = parser.add_argument_group("diarization")
-    diarize_group.add_argument("--diarize", action="store_true",
-                        help="Enable speaker diarization via pyannote (requires pyannote.audio and HF_TOKEN)")
+    diarize_group.add_argument("--no-diarize", action="store_false", dest="diarize",
+                        default=True,
+                        help="Disable speaker diarization (diarization is on by default; requires pyannote.audio and HF_TOKEN)")
     diarize_group.add_argument("--num-speakers", type=int, default=None,
                         help="Exact number of speakers (improves diarization accuracy)")
     diarize_group.add_argument("--speaker-names",
                         help="Comma-separated speaker names in order of first appearance "
                              "(e.g., 'Ross Douthat,Dario Amodei')")
 
+    # Summarization
+    summary_group = parser.add_argument_group("summarization")
+    summary_group.add_argument("--no-summarize", action="store_false", dest="summarize",
+                        default=True,
+                        help="Skip transcript summarization (summarization is on by default)")
+    summary_group.add_argument("--summary-model",
+                        help="Model for summarization (default: same as --claude-model or --local-model)")
+    summary_group.add_argument("--summary-api", action="store_true",
+                        help="Use Anthropic API for summarization (even if main LLM is local)")
+    summary_group.add_argument("--summary-api-key",
+                        help="Separate API key for summarization (default: same as --api-key)")
+
     # Pipeline control
     pipeline_group = parser.add_argument_group("pipeline")
     pipeline_group.add_argument("--steps",
                         help="Run only these pipeline steps (comma-separated). "
-                             "Steps: download, transcribe, ensemble, diarize, slides, merge, markdown, analysis. "
+                             "Steps: download, transcribe, ensemble, diarize, slides, merge, markdown, summarize, analysis. "
                              "Implies --force for listed steps. Existing outputs are used for skipped steps.")
     pipeline_group.add_argument("--force", action="store_true",
                         help="Re-download/process even if files already exist")
@@ -756,6 +769,10 @@ Examples:
         skip_existing=not args.force if not steps else False,
         dry_run=args.dry_run,
         verbose=args.verbose,
+        summarize=args.summarize,
+        summary_local=False if args.summary_api else None,
+        summary_model=args.summary_model,
+        summary_api_key=args.summary_api_key,
     )
 
     data = SpeechData()
@@ -797,6 +814,20 @@ Examples:
             print("  2. Use --api-key YOUR_KEY")
             print("  3. Remove --api to use local Ollama instead (free)")
             print("  4. Add --no-llm to skip LLM-dependent features")
+            sys.exit(1)
+
+    # Validate summary API key if summary uses cloud API
+    if config.summarize and config.summary_local is False and not config.no_llm:
+        summary_key = config.summary_api_key or config.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not summary_key:
+            print()
+            print("Error: --summary-api requested but no API key found.")
+            print()
+            print("Options:")
+            print("  1. Use --summary-api-key YOUR_KEY")
+            print("  2. Use --api-key YOUR_KEY (shared with main LLM)")
+            print("  3. Set ANTHROPIC_API_KEY environment variable")
+            print("  4. Remove --summary-api to use local Ollama for summaries")
             sys.exit(1)
 
     # Show LLM backend info
@@ -866,6 +897,10 @@ Examples:
         if _should_run_step("markdown", config):
             generate_markdown(config, data)
 
+        if config.summarize and _should_run_step("summarize", config):
+            from transcribe_critic.summarize import summarize_transcript
+            summarize_transcript(config, data)
+
         if _should_run_step("analysis", config):
             analyze_source_survival(config, data)
 
@@ -907,6 +942,8 @@ Examples:
             print(f"  - {data.slides_json_path.name}")
         if data.markdown_path and data.markdown_path.exists():
             print(f"  - {data.markdown_path.name}")
+        if data.summary_path and data.summary_path.exists():
+            print(f"  - {data.summary_path.name} (transcript summary)")
         analysis_file = config.output_dir / ANALYSIS_MD
         if analysis_file.exists():
             print(f"  - {analysis_file.name} (source survival analysis)")

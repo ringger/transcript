@@ -74,7 +74,7 @@ class SpeechConfig:
     title: Optional[str] = None  # Override the title (default: from yt-dlp metadata)
     podcast: bool = False  # Podcast mode: audio-only, skip video + captions
     external_transcript: Optional[str] = None  # External transcript file path or URL to include in merge
-    diarize: bool = False  # Enable speaker diarization via pyannote
+    diarize: bool = True  # Speaker diarization via pyannote (disable with --no-diarize)
     num_speakers: Optional[int] = None  # Exact speaker count hint for diarization
     speaker_names: Optional[list] = None  # Manual speaker name mapping (ordered by first appearance)
     steps: Optional[list] = None  # Run only these pipeline steps (None = all)
@@ -92,6 +92,11 @@ class SpeechConfig:
     local_model: str = DEFAULT_LOCAL_MODEL  # Default Ollama model for text
     local_vision_model: str = DEFAULT_LOCAL_VISION_MODEL  # Default Ollama model for vision
     ollama_base_url: str = DEFAULT_OLLAMA_URL
+    # Summarization
+    summarize: bool = True  # Generate transcript summary (disable with --no-summarize)
+    summary_local: Optional[bool] = None  # None = inherit from `local`
+    summary_model: Optional[str] = None  # None = inherit from claude_model / local_model
+    summary_api_key: Optional[str] = None  # None = inherit from api_key
 
 
 # Standard output filenames — single source of truth
@@ -105,6 +110,7 @@ DIARIZED_TXT = "diarized.txt"
 TRANSCRIPT_MERGED_TXT = "transcript_merged.txt"
 ANALYSIS_MD = "analysis.md"
 TRANSCRIPT_MD = "transcript.md"
+SUMMARY_MD = "summary.md"
 SLIDE_TIMESTAMPS_JSON = "slide_timestamps.json"
 SLIDES_TRANSCRIPT_JSON = "slides_transcript.json"
 
@@ -128,6 +134,7 @@ class SpeechData:
     slide_timestamps: list = field(default_factory=list)  # When each slide appears
     transcript_segments: list = field(default_factory=list)  # Segments with timestamps
     diarization_path: Optional[Path] = None  # Diarized structured transcript
+    summary_path: Optional[Path] = None  # Transcript summary
     metadata: dict = field(default_factory=dict)  # Source metadata (title, description, channel, etc.)
 
 
