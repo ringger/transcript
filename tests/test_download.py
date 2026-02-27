@@ -80,7 +80,7 @@ class TestDownloadMedia:
     @patch("transcribe_critic.download.run_command", side_effect=_mock_run_command_for_download)
     def test_downloads_audio_video_captions(self, mock_run, tmp_path):
         config = SpeechConfig(url="https://example.com/v", output_dir=tmp_path,
-                              skip_existing=False)
+                              no_slides=False, skip_existing=False)
         data = SpeechData()
         download_media(config, data)
         assert data.title == "Test Video"

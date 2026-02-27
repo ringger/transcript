@@ -102,15 +102,14 @@ transcribe-critic --speaker-names "Ross Douthat,Dario Amodei" --podcast "https:/
 transcribe-critic --no-diarize "https://..."
 ```
 
-### Speech-Only (No Slides)
+### Basic Usage
 
 ```bash
-# YouTube talk or interview — skip slide extraction
-transcribe-critic "https://youtube.com/watch?v=..." --no-slides
+# YouTube talk or interview (slides off by default)
+transcribe-critic "https://youtube.com/watch?v=..."
 
 # With external transcript for higher accuracy
 transcribe-critic "https://youtube.com/watch?v=..." \
-    --no-slides \
     --external-transcript "https://example.com/transcript"
 ```
 
@@ -118,10 +117,10 @@ transcribe-critic "https://youtube.com/watch?v=..." \
 
 ```bash
 # Extract slides and interleave with transcript
-transcribe-critic "https://youtube.com/watch?v=..."
+transcribe-critic "https://youtube.com/watch?v=..." --slides
 
 # Also describe slide content with vision API
-transcribe-critic "https://youtube.com/watch?v=..." --analyze-slides
+transcribe-critic "https://youtube.com/watch?v=..." --slides --analyze-slides
 ```
 
 ### Custom Options
@@ -223,7 +222,7 @@ Optional stages are skipped based on flags. Stage numbers are fixed regardless o
 | [2] Transcribe audio | `transcribe` | mlx-whisper | No |
 | [2b] Whisper ensemble | `ensemble` | LLM + wdiff | Yes (on by default with 2+ models; default: 3 models) |
 | [2c] Speaker diarization | `diarize` | pyannote.audio | Yes (on by default; `--no-diarize` to skip) |
-| [3] Extract slides | `slides` | ffmpeg | Yes (skipped with `--no-slides` / `--podcast`) |
+| [3] Extract slides | `slides` | ffmpeg | Yes (off by default; `--slides` to enable) |
 | [4] Analyze slides with vision | `slides` | LLM + vision | Yes (`--analyze-slides`) |
 | [4b] Merge transcript sources | `merge` | LLM + wdiff | Yes (on by default; `--no-merge` to skip) |
 | [5] Generate markdown | `markdown` | Python | No |

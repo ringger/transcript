@@ -70,7 +70,7 @@ class SpeechConfig:
     api_key: Optional[str] = None
     claude_model: str = DEFAULT_CLAUDE_MODEL  # Anthropic API model; ignored when local=True (uses local_model)
     skip_existing: bool = True
-    no_slides: bool = False  # Skip slide extraction entirely
+    no_slides: bool = True  # Skip slide extraction entirely (use --slides to enable)
     title: Optional[str] = None  # Override the title (default: from yt-dlp metadata)
     podcast: bool = False  # Podcast mode: audio-only, skip video + captions
     external_transcript: Optional[str] = None  # External transcript file path or URL to include in merge

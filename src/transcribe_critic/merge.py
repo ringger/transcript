@@ -581,20 +581,20 @@ def _merge_structured(skeleton_segments: list, all_sources: list,
         return [s for s in corrected_segments if s is not None]
 
     if chunks_reused > 0:
-        print(f"  Reusing {chunks_reused}/{len(chunks)} chunks from checkpoint, processing {len(chunks) - chunks_reused} via API...")
+        print(f"  Reusing {chunks_reused}/{len(chunks)} chunks from checkpoint, processing {len(chunks) - chunks_reused} via LLM...")
         for chunk_idx in range(chunks_reused):
             chunk_data = _load_chunk_checkpoint(chunks_dir, chunk_idx)
             for i, seg_idx in enumerate(chunks[chunk_idx]):
                 if i < len(chunk_data):
                     corrected_segments[seg_idx] = chunk_data[i]
 
-    # Step 6: Process remaining chunks via API
+    # Step 6: Process remaining chunks via LLM
     for chunk_idx, seg_indices in enumerate(chunks):
         if chunk_idx < chunks_reused:
             continue
 
         chunk_words = sum(len(seg["text"].split()) for seg in (skeleton_segments[i] for i in seg_indices))
-        print(f"  Merging chunk {chunk_idx + 1}/{len(chunks)} via API ({len(seg_indices)} passages, ~{chunk_words} words/source)...")
+        print(f"  Merging chunk {chunk_idx + 1}/{len(chunks)} via LLM ({len(seg_indices)} passages, ~{chunk_words} words/source)...")
 
         # Build anonymous passage text
         passage_texts = ""
@@ -724,7 +724,7 @@ def _merge_multi_source(sources: list,
         return "\n\n".join(merged_chunks)
 
     if chunks_reused > 0:
-        print(f"  Reusing {chunks_reused}/{num_chunks} chunks from checkpoint, processing {num_chunks - chunks_reused} via API...")
+        print(f"  Reusing {chunks_reused}/{num_chunks} chunks from checkpoint, processing {num_chunks - chunks_reused} via LLM...")
         for i in range(chunks_reused):
             merged_chunks.append(_load_chunk_checkpoint(chunks_dir, i))
 
@@ -733,7 +733,7 @@ def _merge_multi_source(sources: list,
             continue
 
         chunk_words = end - start
-        print(f"  Merging chunk {chunk_idx + 1}/{num_chunks} via API (~{chunk_words} words/source)...")
+        print(f"  Merging chunk {chunk_idx + 1}/{num_chunks} via LLM (~{chunk_words} words/source)...")
 
         # Extract aligned text for this chunk from all sources
         chunk_texts = _extract_aligned_chunk(anchor_words, start, end,

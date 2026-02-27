@@ -584,7 +584,7 @@ Examples:
   %(prog)s "https://youtube.com/watch?v=..." --analyze-slides
   %(prog)s "https://youtube.com/watch?v=..." --no-merge
   %(prog)s "https://youtube.com/watch?v=..." --whisper-models small,medium,distil-large-v3
-  %(prog)s "https://youtube.com/watch?v=..." --no-slides --external-transcript URL
+  %(prog)s "https://youtube.com/watch?v=..." --external-transcript URL
   %(prog)s "https://youtube.com/watch?v=..." -o my_speech --whisper-models small
   %(prog)s --podcast "https://www.iheart.com/podcast/.../episode/..."
         """
@@ -613,12 +613,12 @@ Examples:
 
     # Slides
     slides_group = parser.add_argument_group("slides")
-    slides_group.add_argument("--no-slides", action="store_true",
-                        help="Skip slide extraction entirely (audio/transcript only)")
+    slides_group.add_argument("--slides", action="store_true",
+                        help="Enable slide extraction from video (off by default)")
     input_group.add_argument("--title",
                         help="Override the title (default: from yt-dlp metadata)")
     input_group.add_argument("--podcast", action="store_true",
-                        help="Podcast mode: audio-only, skip video and captions download (implies --no-slides)")
+                        help="Podcast mode: audio-only, skip video and captions download")
     slides_group.add_argument("--scene-threshold", type=float, default=0.1,
                         help="Scene detection threshold 0-1 (default: 0.1)")
     slides_group.add_argument("--analyze-slides", action="store_true",
@@ -741,8 +741,8 @@ Examples:
             print(f"Valid steps: {', '.join(sorted(VALID_STEPS))}")
             sys.exit(1)
 
-    # Podcast mode implies --no-slides
-    no_slides = args.no_slides or args.podcast
+    # --slides enables slide extraction; podcast mode always disables
+    no_slides = not args.slides or args.podcast
 
     # Create config
     config = SpeechConfig(

@@ -979,7 +979,7 @@ class TestCheckpointFileIntegrity:
     @patch("transcribe_critic.merge.create_llm_client")
     @patch("transcribe_critic.merge.llm_call_with_retry")
     def test_stale_checkpoint_is_reprocessed(self, mock_api, mock_client, mock_align, tmp_path):
-        """A checkpoint older than a source should be re-processed via API."""
+        """A checkpoint older than a source should be re-processed via LLM."""
         segments, all_sources = self._make_segments_and_sources(2)
 
         word_count = sum(len(s["text"].split()) for s in segments)
