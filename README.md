@@ -276,6 +276,64 @@ Here are specific corrections the merge made by adjudicating across sources:
 
 Each source alone gets some things right and others wrong. Whisper hallucinates proper nouns ("Cloud" for "Claude", "Douthend" for "Douthat"). YouTube captions lack capitalization and punctuation but sometimes have correct spellings. The external transcript has the best proper nouns but may paraphrase or omit filler words. The merge selects the best reading at each disagreement, producing a transcript more accurate than any individual source.
 
+### How Audio Quality Affects the Merge
+
+Audio quality dramatically affects how much value the multi-source pipeline adds. Here are source survival stats from two runs — a studio-recorded YouTube video vs. a lecture hall recording of a mathematics talk:
+
+| Video | Audio | Whisper Coverage | Whisper Retention | YouTube Coverage | YouTube Retention |
+|-------|-------|-----------------|-------------------|-----------------|-------------------|
+| Financial commentary (studio) | Clean, single mic | 98% | 97% | 99% | 97% |
+| Math lecture (lecture hall) | Room acoustics, accent | 98% | 96% | 96% | 79% |
+
+On clean studio audio, all sources largely agree — the pipeline validates more than it corrects. On difficult audio (room acoustics, accented speaker, dense technical vocabulary), the sources diverge significantly and the merge step earns its keep.
+
+#### Whisper Ensemble Corrections
+
+When multiple Whisper models transcribe the same audio, each stumbles differently on unfamiliar terms. The ensemble adjudicator selects the best reading:
+
+**Proper nouns** — individual models mangle names that at least one other model gets right:
+
+| What was said | small | medium | distil-large-v3 | Merged |
+|---------------|-------|--------|-----------------|--------|
+| "Cauchy" | Cauchy | Cauchy | Kaoshi | **Cauchy** |
+| "Erdos" | Erdisch | Urdish | Erdush | **Erdos** |
+| "Boris Alexeev" | as Alexi | as well as Alexi | Boris Alexiev | **Boris Alexeev** |
+
+**Mathematical terminology** — the LLM adjudicator's domain knowledge helps select the correct technical term:
+
+| What was said | small | medium | distil-large-v3 | Merged |
+|---------------|-------|--------|-----------------|--------|
+| "arithmetic progressions" | arithmetic corrections | arithmetic progressions | algorithmic progressions | **arithmetic progressions** |
+| "p-adic valuations" | five-out evaluations | five adiabatic valuations | phybatic valuations | **p-adic valuations** |
+| "monotonic sequence" | monitoring sequence | monitoring sequence | monitor sequence | **monotonic sequence** |
+
+**Search engine name** — all Whisper models failed; YouTube captions provided the correct reading:
+
+| What was said | Whisper (all 3 models) | YouTube captions | Merged |
+|---------------|----------------------|-----------------|--------|
+| "AltaVista" | Out of Easter / Auto-Easter | AltaVista | **AltaVista** |
+
+#### LLM Backend Comparison
+
+The choice of LLM backend for adjudication matters. The same source material was merged twice — once with a local 14B-parameter model (Qwen 2.5:14b via Ollama), once with Claude Sonnet via API:
+
+| | Local (Qwen 2.5:14b) | Claude API (Sonnet) |
+|---|---|---|
+| **Whisper retention** | 80% | 96% |
+| **YouTube retention** | 67% | 79% |
+| **Merged word count** | 4,331 | 4,786 |
+| **LLM leakage** | 2 instances | None |
+
+The local model dropped significantly more content during merging and twice inserted its own commentary into the transcript — meta-remarks about its merge process that were not part of the original speech. Claude Sonnet retained more source material and followed the "output only the speaker's words" instruction cleanly.
+
+However, stronger models can also overcorrect. In one case, all three Whisper models correctly heard the speaker say "Nano Banana" (a Google image generation model). The local model preserved it. Claude Sonnet, apparently judging this an unlikely name, replaced it with "Claude" — a plausible but incorrect substitution:
+
+| What was said | Whisper (all 3 models) | Local merge | Claude API merge |
+|---------------|----------------------|-------------|-----------------|
+| "Nano Banana" (Google model) | Nano Banana | **Nano Banana** (correct) | Claude (wrong) |
+
+The lesson: stronger LLMs are better adjudicators overall, but they are also more willing to override unanimous source agreement when their priors suggest a "more likely" reading. Unfamiliar but correct proper nouns are the primary risk. See [docs/transcript-sources.md](docs/transcript-sources.md) for more on source quality characteristics.
+
 ### Multi-Model Whisper Merging
 
 When using multiple Whisper models (default: `small,medium,distil-large-v3`):

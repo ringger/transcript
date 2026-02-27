@@ -79,15 +79,20 @@ def diarize_audio(config: SpeechConfig, data: SpeechData) -> None:
 def _make_progress_hook():
     """Return a pyannote hook callback that prints step progress."""
     last_step = [None]
+    last_pct = [None]
 
     def hook(step_name, step_artifact, **kwargs):
         completed = kwargs.get("completed", None)
         total = kwargs.get("total", None)
         if completed is not None and total and total > 0:
             pct = int(100 * completed / total)
-            print(f"  {step_name}: {pct}% ({completed}/{total})")
+            pct_bucket = pct // 10 * 10  # round down to nearest 10%
             if completed >= total:
                 print(f"  {step_name}: done")
+                last_pct[0] = None
+            elif pct_bucket != last_pct[0]:
+                print(f"  {step_name}: {pct}% ({completed}/{total})")
+                last_pct[0] = pct_bucket
         elif step_name != last_step[0]:
             last_step[0] = step_name
 
@@ -248,6 +253,7 @@ def _get_embeddings_checkpointed(pipeline, file, binary_segmentations,
         next(batches, None)
 
     print(f"  Embeddings: {batch_count} batches, checkpointing every {checkpoint_every}")
+    last_pct_bucket = None
 
     for i, batch in enumerate(batches, completed_batches + 1):
         waveforms, masks = zip(*filter(lambda b: b[0] is not None, batch))
@@ -258,10 +264,12 @@ def _get_embeddings_checkpointed(pipeline, file, binary_segmentations,
         embedding_batches.append(embedding_batch)
 
         pct = int(100 * i / batch_count)
+        pct_bucket = pct // 10 * 10
         if i >= batch_count:
             print(f"  embeddings: done")
-        else:
+        elif pct_bucket != last_pct_bucket:
             print(f"  embeddings: {pct}% ({i}/{batch_count})")
+            last_pct_bucket = pct_bucket
 
         # Periodic checkpoint
         if i % checkpoint_every == 0 and i < batch_count:

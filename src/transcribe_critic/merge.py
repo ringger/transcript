@@ -624,8 +624,8 @@ No source is more reliable than any other — judge each difference on its merit
 3. Output each passage on its own line in this format:
    PASSAGE 1: [merged text]
    PASSAGE 2: [merged text]
-4. Do NOT add commentary or notes — output ONLY the merged passages.
-5. Output exactly {len(seg_indices)} passages.
+4. Output exactly {len(seg_indices)} passages.
+5. Output ONLY the speaker's words. Never add your own commentary, notes, descriptions of your process, or parenthetical remarks about what you did. Every word in your output must be something the speaker actually said.
 
 Output the merged passages:"""
 
@@ -759,7 +759,7 @@ No source is more reliable than any other — judge each difference on its merit
    - Prefer the version that makes more grammatical and contextual sense
    - If one source includes words that others omit, include them if they fit the context
 3. Maintain natural paragraph breaks for readability.
-4. Do NOT add commentary or notes — output ONLY the merged transcript text.
+4. Output ONLY the speaker's words. Never add your own commentary, notes, descriptions of your process, or parenthetical remarks about what you did. Every word in your output must be something the speaker actually said.
 
 Output the merged transcript:"""
 
