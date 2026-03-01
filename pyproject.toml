@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transcribe-critic"
-version = "1.2.0"
+version = "1.3.0"
 description = "Multi-source speech transcription with LLM-based adjudication inspired by textual criticism"
 readme = "README.md"
 license = "MIT"
